@@ -1024,7 +1024,15 @@ impl App {
             let join = self.join;
             let (ro, rs) = (Rect::new(left - 8.0 * s - one, by, one, bh), Rect::new(left - 8.0 * s - one - 2.0 * s - sep, by, sep, bh));
             let on = |yes: bool| if yes { Style::On } else { Style::Secondary };
-            self.button(c, ro, Act::Join(true), "Join the kept pieces, in order, into one file, without re-encoding", Some(Icon::File), Some("One file"), on(join));
+            self.button(
+                c,
+                ro,
+                Act::Join(true),
+                "Join the kept pieces, in order, into one file, without re-encoding",
+                Some(Icon::File),
+                Some("One file"),
+                on(join),
+            );
             self.button(c, rs, Act::Join(false), "Write each kept piece to its own file", Some(Icon::Files), Some("Separate files"), on(!join));
             left = rs.x;
         }
@@ -1228,7 +1236,15 @@ impl App {
         let lbl = format!("Split in {n}");
         let w = c.text.measure(&lbl, 13.0 * s) + 18.0 * s + 6.0 * s + 24.0 * s;
         let style = if pieces == n && self.equal_split(n) { Style::On } else { Style::Secondary };
-        self.button(c, Rect::new(x, cy - bh / 2.0, w, bh), Act::NApply, "Split the kept part into this many equal pieces", Some(Icon::Columns), Some(&lbl), style);
+        self.button(
+            c,
+            Rect::new(x, cy - bh / 2.0, w, bh),
+            Act::NApply,
+            "Split the kept part into this many equal pieces",
+            Some(Icon::Columns),
+            Some(&lbl),
+            style,
+        );
         x += w + 6.0 * s;
         if has_cuts {
             self.button(c, Rect::new(x, cy - bh / 2.0, bh, bh), Act::ClearCuts, "Remove all cuts (0)", Some(Icon::Trash), None, Style::Ghost);
