@@ -280,7 +280,7 @@ fn turned(src: Vec<u8>, w: usize, h: usize, quarters: u8) -> Vec<u8> {
 
 /// One decoded picture, not yet converted.
 pub struct Decoded {
-    /// The time Media Foundation gives it (100 ns).
+    /// Its time in the file's media timeline (100 ns).
     pub ts: i64,
     sample: IMFSample,
 }
@@ -295,6 +295,8 @@ pub struct VideoReader {
     yuv: Yuv,
     /// Quarter turns clockwise to show it upright.
     turn: u8,
+    /// Add to Media Foundation's clock for the file's (see [`VideoReader::open`]).
+    shift: i64,
     _gpu: Option<Gpu>,
 }
 
@@ -302,7 +304,12 @@ pub struct VideoReader {
 unsafe impl Send for VideoReader {}
 
 impl VideoReader {
-    pub fn open(path: &Path, hardware: bool, turn: u8) -> Result<VideoReader> {
+    /// The reader for `path`, whose first picture is at `first` (100 ns) in
+    /// its media timeline. Whatever the system's MP4 source does with edit
+    /// lists (older ones ignore them, newer ones start the clock where they
+    /// say), the first picture read shows how its clock relates to the file's,
+    /// and times here are always the file's.
+    pub fn open(path: &Path, hardware: bool, turn: u8, first: i64) -> Result<VideoReader> {
         com_init();
         let gpu = if hardware { gpu() } else { None };
         let r = reader(path, gpu.as_ref())?;
@@ -329,17 +336,20 @@ impl VideoReader {
             let range = cur.GetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE).unwrap_or(0);
             let bt709 = if matrix == MFVideoTransferMatrix_BT601.0 as u32 { false } else { matrix == MFVideoTransferMatrix_BT709.0 as u32 || shown.1 >= 720 };
             let yuv = Yuv::of(bt709, range == MFNominalRange_0_255.0 as u32);
-            Ok(VideoReader { r, coded, shown, stride, yuv, turn, _gpu: gpu })
+            let shift = next(&r, VIDEO).map_or(0, |(ts, _)| first - ts);
+            seek(&r, 0)?;
+            Ok(VideoReader { r, coded, shown, stride, yuv, turn, shift, _gpu: gpu })
         }
     }
 
+    /// Seek to the last key frame at or before `hns` in the file's time.
     pub fn seek(&mut self, hns: i64) -> Result<()> {
-        seek(&self.r, hns)
+        seek(&self.r, hns - self.shift)
     }
 
     /// The next picture in presentation order.
     pub fn next(&mut self) -> Option<Decoded> {
-        next(&self.r, VIDEO).map(|(ts, sample)| Decoded { ts, sample })
+        next(&self.r, VIDEO).map(|(ts, sample)| Decoded { ts: ts + self.shift, sample })
     }
 
     /// The picture as BGRA, scaled to `size`.
@@ -380,6 +390,8 @@ pub struct AudioReader {
     r: IMFSourceReader,
     pub rate: u32,
     pub channels: u16,
+    /// Add to Media Foundation's clock for the file's: sound starts at 0 there.
+    shift: i64,
 }
 
 // SAFETY: Media Foundation's objects are free-threaded; used by one thread at a time.
@@ -399,15 +411,18 @@ impl AudioReader {
             let cur = r.GetCurrentMediaType(AUDIO)?;
             let rate = cur.GetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND)?;
             let channels = cur.GetUINT32(&MF_MT_AUDIO_NUM_CHANNELS)? as u16;
-            Ok(AudioReader { r, rate, channels })
+            let shift = next(&r, AUDIO).map_or(0, |(ts, _)| -ts);
+            seek(&r, 0)?;
+            Ok(AudioReader { r, rate, channels, shift })
         }
     }
 
+    /// Seek to `hns` in the file's time.
     pub fn seek(&mut self, hns: i64) -> Result<()> {
-        seek(&self.r, hns)
+        seek(&self.r, hns - self.shift)
     }
 
-    /// The next packet's time (100 ns) and samples (interleaved).
+    /// The next packet's time in the file (100 ns) and samples (interleaved).
     pub fn next(&mut self) -> Option<(i64, Vec<f32>)> {
         let (ts, sample) = next(&self.r, AUDIO)?;
         // SAFETY: the buffer stays locked while its bytes are read.
@@ -417,7 +432,7 @@ impl AudioReader {
             buf.Lock(&mut data, None, Some(&mut len)).ok()?;
             let v = std::slice::from_raw_parts(data.cast::<u8>(), len as usize).chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
             let _ = buf.Unlock();
-            Some((ts, v))
+            Some((ts + self.shift, v))
         }
     }
 }
@@ -457,7 +472,7 @@ mod tests {
         assert_eq!(turned(src, 2, 1, 3), [b, a].concat());
     }
 
-    /// What times Media Foundation gives files with and without a hidden
+    /// What times this system's Media Foundation gives files with and without a hidden
     /// lead-in (run with --nocapture): how its clock relates to the file's.
     #[test]
     #[ignore = "exploration"]
@@ -507,7 +522,7 @@ mod tests {
             let info = crate::mp4::info(&mut std::io::BufReader::new(std::fs::File::open(p).unwrap())).unwrap();
             println!("{name}: info frames {:?}.. of {}; keys {:?}", &info.frames[..3], info.frames.len(), &info.keys[..2]);
             for hw in [false, true] {
-                let mut v = VideoReader::open(p, hw, 0).unwrap();
+                let mut v = VideoReader::open(p, hw, 0, 0).unwrap();
                 println!("  hw={hw} coded {:?} shown {:?} stride {}", v.coded, v.shown, v.stride);
                 let mut got = Vec::new();
                 for _ in 0..4 {
