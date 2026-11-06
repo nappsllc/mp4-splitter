@@ -44,13 +44,7 @@ fn secs(t: Duration) -> String {
     format!("{:.6}", t.as_secs_f64())
 }
 
-/// An RGBA picture.
-#[derive(Clone)]
-pub struct Picture {
-    pub w: u32,
-    pub h: u32,
-    pub rgba: Vec<u8>,
-}
+pub use crate::paint::Picture;
 
 /// The picture shown at `t`, `w` × `h`. `fast`: the key frame before it
 /// (thumbnails), else exactly the frame at `t`.
@@ -61,7 +55,7 @@ pub fn picture_at(exe: &Path, src: &Path, t: Duration, w: u32, h: u32, fast: boo
     }
     c.args(["-ss", &secs(t)]).arg("-i").arg(src);
     let flags = if fast { "fast_bilinear" } else { "bicubic" };
-    c.args(["-an", "-sn", "-dn", "-frames:v", "1", "-vf", &format!("scale={w}:{h}:flags={flags}"), "-f", "rawvideo", "-pix_fmt", "rgba", "-"]);
+    c.args(["-an", "-sn", "-dn", "-frames:v", "1", "-vf", &format!("scale={w}:{h}:flags={flags}"), "-f", "rawvideo", "-pix_fmt", "bgra", "-"]);
     let out = c.output().context("run ffmpeg")?;
     let want = (w * h * 4) as usize;
     if out.stdout.len() < want {
@@ -72,9 +66,9 @@ pub fn picture_at(exe: &Path, src: &Path, t: Duration, w: u32, h: u32, fast: boo
         }
         bail!("ffmpeg gave no picture at {:.3}s", t.as_secs_f64());
     }
-    let mut rgba = out.stdout;
-    rgba.truncate(want);
-    Ok(Picture { w, h, rgba })
+    let mut bgra = out.stdout;
+    bgra.truncate(want);
+    Ok(Picture { w, h, bgra: std::sync::Arc::new(bgra) })
 }
 
 /// A child that is killed when dropped.
@@ -92,7 +86,7 @@ impl Drop for Proc {
 pub fn video_from(exe: &Path, src: &Path, t: Duration, w: u32, h: u32) -> Result<(Proc, impl Read + Send + use<>)> {
     let mut c = command(exe);
     c.args(["-ss", &secs(t)]).arg("-i").arg(src);
-    c.args(["-an", "-sn", "-dn", "-fps_mode", "passthrough", "-vf", &format!("scale={w}:{h}:flags=bilinear"), "-f", "rawvideo", "-pix_fmt", "rgba", "-"]);
+    c.args(["-an", "-sn", "-dn", "-fps_mode", "passthrough", "-vf", &format!("scale={w}:{h}:flags=bilinear"), "-f", "rawvideo", "-pix_fmt", "bgra", "-"]);
     let mut child = c.spawn().context("run ffmpeg")?;
     let out = child.stdout.take().context("no ffmpeg output")?;
     Ok((Proc(child), out))

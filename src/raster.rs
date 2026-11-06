@@ -1,0 +1,648 @@
+//! From Rustshot (https://github.com/nappsllc/rustshot, src/raster.rs), Apache-2.0.
+//!
+//! Hand-rolled anti-aliased raster primitives for baking annotation objects
+//! into an opaque RGBA buffer. Replaces the `tiny-skia` dependency.
+//!
+//! Strokes use signed-distance coverage (`band - dist`, band = half-width + 0.5
+//! at pixel centers), which yields round caps and joins for free. Polylines
+//! accumulate coverage into a scratch mask with `max`, so joints blend exactly
+//! once with the minimum distance to any segment.
+
+use crate::objects::{FRect, Pt};
+use crate::uifb::C4;
+
+/// How a source color combines with the destination.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Blend {
+    Normal,
+    /// PDF-style multiply weighted by source alpha (the highlighter marker).
+    Multiply,
+}
+
+/// Byte order of a 4-byte pixel.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Order {
+    #[default]
+    Rgba,
+    /// Windows DIB sections (the GDI overlay); built by the overlay path.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Bgra,
+}
+
+impl Order {
+    /// Byte index of the r, g, b channels within a pixel.
+    #[inline(always)]
+    pub fn rgb_idx(self) -> [usize; 3] {
+        match self {
+            Order::Rgba => [0, 1, 2],
+            Order::Bgra => [2, 1, 0],
+        }
+    }
+}
+
+/// A mutable draw target: raw pixel bytes plus its dimensions. The buffer
+/// covers image coordinates `ox..ox + w` x `oy..oy + h`; every draw call
+/// takes image coordinates and clips to that window.
+pub struct Surf<'a> {
+    pub data: &'a mut [u8],
+    w: u32,
+    h: u32,
+    ox: i32,
+    oy: i32,
+    order: Order,
+}
+
+impl<'a> Surf<'a> {
+    pub fn new(data: &'a mut [u8], w: u32, h: u32) -> Self {
+        Self::with_origin(data, w, h, 0, 0, Order::Rgba)
+    }
+
+    /// A surface whose top-left pixel is image pixel (`ox`, `oy`).
+    pub fn with_origin(data: &'a mut [u8], w: u32, h: u32, ox: i32, oy: i32, order: Order) -> Self {
+        Surf { data, w, h, ox, oy, order }
+    }
+
+    /// The window in image coordinates: (x0, y0, x1, y1), end-exclusive.
+    pub fn bounds(&self) -> (i32, i32, i32, i32) {
+        (self.ox, self.oy, self.ox + self.w as i32, self.oy + self.h as i32)
+    }
+
+    pub fn width(&self) -> u32 {
+        self.w
+    }
+
+    pub fn order(&self) -> Order {
+        self.order
+    }
+
+    /// Blend one pixel: straight-alpha source over an opaque destination.
+    pub fn blend_px(&mut self, x: i32, y: i32, c: C4, cov: f32, blend: Blend) {
+        let (x, y) = (x - self.ox, y - self.oy);
+        if x < 0 || y < 0 || x >= self.w as i32 || y >= self.h as i32 {
+            return;
+        }
+        let idx = (y as u32 * self.w + x as u32) as usize * 4;
+        if idx + 3 >= self.data.len() {
+            return;
+        }
+        let a = (c.a as f32 * cov.clamp(0.0, 1.0)) / 255.0;
+        if a <= 0.0 {
+            return;
+        }
+        let inv = 1.0 - a;
+        let src = [c.r, c.g, c.b];
+        let ch = self.order.rgb_idx();
+        for (sv, &i) in src.iter().zip(&ch) {
+            let dv = self.data[idx + i] as f32;
+            let sv = *sv as f32;
+            let v = match blend {
+                Blend::Normal => sv * a + dv * inv,
+                Blend::Multiply => dv * inv + dv * (sv / 255.0) * a,
+            };
+            self.data[idx + i] = v.round().clamp(0.0, 255.0) as u8;
+        }
+        self.data[idx + 3] = 255;
+    }
+
+    /// The raw bytes of pixel (`x`, `y`) (image coordinates) in the
+    /// surface's own order; `None` outside the window.
+    #[inline]
+    pub fn get_raw(&self, x: i32, y: i32) -> Option<[u8; 4]> {
+        let (x, y) = (x - self.ox, y - self.oy);
+        if x < 0 || y < 0 || x >= self.w as i32 || y >= self.h as i32 {
+            return None;
+        }
+        let i = (y as u32 * self.w + x as u32) as usize * 4;
+        self.data.get(i..i + 4).map(|p| [p[0], p[1], p[2], p[3]])
+    }
+
+    /// Mix raw pixel `px` (the surface's order) over pixel (`x`, `y`) by
+    /// coverage `cov` (1: replaced); the result is opaque.
+    #[inline]
+    pub fn mix_raw(&mut self, x: i32, y: i32, px: [u8; 4], cov: f32) {
+        let (x, y) = (x - self.ox, y - self.oy);
+        if x < 0 || y < 0 || x >= self.w as i32 || y >= self.h as i32 || cov <= 0.0 {
+            return;
+        }
+        let i = (y as u32 * self.w + x as u32) as usize * 4;
+        let Some(d) = self.data.get_mut(i..i + 4) else { return };
+        if cov >= 1.0 {
+            d[..3].copy_from_slice(&px[..3]);
+        } else {
+            for c in 0..3 {
+                d[c] = (px[c] as f32 * cov + d[c] as f32 * (1.0 - cov)).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+        d[3] = 255;
+    }
+
+    /// Stroke a polyline (or a single point) with round caps/joins and AA.
+    pub fn stroke_polyline(&mut self, pts: &[Pt], width: f32, c: C4, blend: Blend) {
+        let mut m = Mask::around(self, pts, width.max(0.5) / 2.0 + 1.0);
+        m.polyline(pts, width);
+        m.blend(self, c, blend);
+    }
+
+    /// Stroke an ellipse via its signed-distance field.
+    pub fn stroke_ellipse(&mut self, r: FRect, width: f32, c: C4, blend: Blend) {
+        let rx = (r.w / 2.0).max(0.5);
+        let ry = (r.h / 2.0).max(0.5);
+        let cx = r.x + r.w / 2.0;
+        let cy = r.y + r.h / 2.0;
+        let band = width.max(0.5) / 2.0 + 0.5;
+        let bounds = self.bounds();
+        let (x0, y0, x1, y1) = clamp_bbox(
+            (cx - rx - band).floor() as i32,
+            (cy - ry - band).floor() as i32,
+            (cx + rx + band).ceil() as i32,
+            (cy + ry + band).ceil() as i32,
+            bounds,
+        );
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let (px, py) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
+                let (gx, gy) = (px / (rx * rx), py / (ry * ry));
+                let gnorm = 2.0 * (gx * gx + gy * gy).sqrt();
+                let k = (px / rx) * (px / rx) + (py / ry) * (py / ry);
+                let d = if gnorm < 1e-9 { f32::MAX } else { (k - 1.0) / gnorm };
+                let cov = (band - d.abs()).clamp(0.0, 1.0);
+                if cov > 0.0 {
+                    self.blend_px(x, y, c, cov, blend);
+                }
+            }
+        }
+    }
+
+    /// Stroke a rounded rectangle via the exact rounded-box SDF.
+    pub fn stroke_round_rect(&mut self, r: FRect, radius: f32, width: f32, c: C4, blend: Blend) {
+        let rad = radius.min(r.w / 2.0).min(r.h / 2.0).max(0.0);
+        let band = width.max(0.5) / 2.0 + 0.5;
+        let cx = r.x + r.w / 2.0;
+        let cy = r.y + r.h / 2.0;
+        let hx = (r.w / 2.0 - rad).max(0.0);
+        let hy = (r.h / 2.0 - rad).max(0.0);
+        let bounds = self.bounds();
+        let (x0, y0, x1, y1) =
+            clamp_bbox((r.x - band).floor() as i32, (r.y - band).floor() as i32, (r.x1() + band).ceil() as i32, (r.y1() + band).ceil() as i32, bounds);
+        // Interior pixels well inside the outline (q < lim on both axes:
+        // d <= -band - 0.5, zero coverage) are skipped, so a large shape
+        // (a rect being dragged out) costs its border, not its area.
+        let lim = 0.0f32.min(rad - band) - 0.5;
+        for y in y0..y1 {
+            let qy_row = (y as f32 + 0.5 - cy).abs() - hy;
+            let (skip0, skip1) = if qy_row < lim {
+                // |x + 0.5 - cx| - hx < lim for every x in [skip0, skip1).
+                (((cx - hx - lim).ceil() as i32).max(x0), ((cx + hx + lim).floor() as i32).min(x1))
+            } else {
+                (x1, x1)
+            };
+            for x in (x0..skip0.min(x1)).chain(skip1.max(skip0).max(x0)..x1) {
+                let px = (x as f32 + 0.5 - cx).abs();
+                let py = (y as f32 + 0.5 - cy).abs();
+                let qx = px - hx;
+                let qy = py - hy;
+                let outside = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt();
+                let inside = qx.max(qy).min(0.0);
+                let d = outside + inside - rad;
+                let cov = (band - d.abs()).clamp(0.0, 1.0);
+                if cov > 0.0 {
+                    self.blend_px(x, y, c, cov, blend);
+                }
+            }
+        }
+    }
+
+    /// Fill a convex polygon with analytic edge coverage (objects build a
+    /// [`Mask`] instead, to combine it with other parts).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn fill_convex(&mut self, pts: &[Pt], c: C4, blend: Blend) {
+        let mut m = Mask::around(self, pts, 0.0);
+        m.convex(pts);
+        m.blend(self, c, blend);
+    }
+}
+
+/// A coverage mask over a window of image pixels. Several primitives add
+/// to it with `max` and it is blended once, so the parts of one object
+/// (an arrow's shaft and head, overlapping glyphs) never blend twice where
+/// they overlap: a translucent object has one uniform alpha.
+pub struct Mask {
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    a: Vec<u8>,
+}
+
+impl Mask {
+    /// A mask over `[x0, x1) x [y0, y1)` clipped to the surface window.
+    pub fn new(sf: &Surf, x0: i32, y0: i32, x1: i32, y1: i32) -> Self {
+        let (x0, y0, x1, y1) = clamp_bbox(x0, y0, x1, y1, sf.bounds());
+        let (x1, y1) = (x1.max(x0), y1.max(y0));
+        Mask { x0, y0, x1, y1, a: vec![0; ((x1 - x0) * (y1 - y0)) as usize] }
+    }
+
+    /// A mask over the bounding box of `pts` grown by `margin`.
+    pub fn around(sf: &Surf, pts: &[Pt], margin: f32) -> Self {
+        let (mut minx, mut miny, mut maxx, mut maxy) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for p in pts {
+            (minx, miny, maxx, maxy) = (minx.min(p.x), miny.min(p.y), maxx.max(p.x), maxy.max(p.y));
+        }
+        if pts.is_empty() {
+            return Mask::new(sf, 0, 0, 0, 0);
+        }
+        Mask::new(sf, (minx - margin).floor() as i32, (miny - margin).floor() as i32, (maxx + margin).ceil() as i32, (maxy + margin).ceil() as i32)
+    }
+
+    /// Raise pixel (`x`, `y`) (image coordinates) to coverage `cov`.
+    #[inline]
+    pub fn put(&mut self, x: i32, y: i32, cov: f32) {
+        if x < self.x0 || y < self.y0 || x >= self.x1 || y >= self.y1 || cov <= 0.0 {
+            return;
+        }
+        let i = ((y - self.y0) * (self.x1 - self.x0) + (x - self.x0)) as usize;
+        let v = (cov.min(1.0) * 255.0).round() as u8;
+        if v > self.a[i] {
+            self.a[i] = v;
+        }
+    }
+
+    /// A polyline's (or a single point's) stroke with round caps/joins.
+    pub fn polyline(&mut self, pts: &[Pt], width: f32) {
+        if pts.is_empty() {
+            return;
+        }
+        let half = width.max(0.5) / 2.0;
+        let (margin, band) = (half + 1.0, half + 0.5);
+        let mut segs: Vec<(Pt, Pt)> = Vec::with_capacity(pts.len());
+        if pts.len() == 1 {
+            segs.push((pts[0], pts[0]));
+        } else {
+            for s in pts.windows(2) {
+                segs.push((s[0], s[1]));
+            }
+        }
+        let win = (self.x0, self.y0, self.x1, self.y1);
+        for (a, b) in segs {
+            let (lx0, ly0, lx1, ly1) = clamp_bbox(
+                (a.x.min(b.x) - margin).floor() as i32,
+                (a.y.min(b.y) - margin).floor() as i32,
+                (a.x.max(b.x) + margin).ceil() as i32,
+                (a.y.max(b.y) + margin).ceil() as i32,
+                win,
+            );
+            for y in ly0..ly1 {
+                for x in lx0..lx1 {
+                    let d = dist_seg(x as f32 + 0.5, y as f32 + 0.5, a.x, a.y, b.x, b.y);
+                    self.put(x, y, (band - d).clamp(0.0, 1.0));
+                }
+            }
+        }
+    }
+
+    /// A convex polygon's fill with analytic edge coverage.
+    pub fn convex(&mut self, pts: &[Pt]) {
+        if pts.len() < 3 {
+            return;
+        }
+        let n = pts.len();
+        let mut area = 0.0;
+        for i in 0..n {
+            let (a, b) = (pts[i], pts[(i + 1) % n]);
+            area += a.x * b.y - b.x * a.y;
+        }
+        if area == 0.0 {
+            return;
+        }
+        let orient = if area > 0.0 { 1.0 } else { -1.0 };
+        let (mut minx, mut miny, mut maxx, mut maxy) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for p in pts {
+            (minx, miny, maxx, maxy) = (minx.min(p.x), miny.min(p.y), maxx.max(p.x), maxy.max(p.y));
+        }
+        let (x0, y0, x1, y1) =
+            clamp_bbox(minx.floor() as i32, miny.floor() as i32, maxx.ceil() as i32, maxy.ceil() as i32, (self.x0, self.y0, self.x1, self.y1));
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                let mut min_d = f32::MAX;
+                for i in 0..n {
+                    let (a, b) = (pts[i], pts[(i + 1) % n]);
+                    let (ex, ey) = (b.x - a.x, b.y - a.y);
+                    let len = (ex * ex + ey * ey).sqrt().max(1e-6);
+                    min_d = min_d.min(orient * (ex * (py - a.y) - ey * (px - a.x)) / len);
+                }
+                self.put(x, y, (min_d + 0.5).clamp(0.0, 1.0));
+            }
+        }
+    }
+
+    /// A rounded rectangle's fill (exact rounded-box SDF, AA edge).
+    pub fn round_box(&mut self, r: FRect, radius: f32) {
+        let rad = radius.min(r.w / 2.0).min(r.h / 2.0).max(0.0);
+        let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        let (hx, hy) = ((r.w / 2.0 - rad).max(0.0), (r.h / 2.0 - rad).max(0.0));
+        let (x0, y0, x1, y1) = clamp_bbox(
+            (r.x - 1.0).floor() as i32,
+            (r.y - 1.0).floor() as i32,
+            (r.x1() + 1.0).ceil() as i32,
+            (r.y1() + 1.0).ceil() as i32,
+            (self.x0, self.y0, self.x1, self.y1),
+        );
+        let full = |qx: f32, qy: f32| qx <= 0.0 && qy <= 0.0 && qx.max(qy) - rad <= -0.5;
+        let w = (self.x1 - self.x0) as usize;
+        for y in y0..y1 {
+            let qy = (y as f32 + 0.5 - cy).abs() - hy;
+            for x in x0..x1 {
+                let qx = (x as f32 + 0.5 - cx).abs() - hx;
+                if full(qx, qy) {
+                    // Inside by half a pixel or more: covered (the SDF's 1),
+                    // and so is the run up to the mirror pixel.
+                    let mut e = x;
+                    while e < x1 && full((e as f32 + 0.5 - cx).abs() - hx, qy) {
+                        e += 1;
+                    }
+                    let row = (y - self.y0) as usize * w;
+                    self.a[row + (x - self.x0) as usize..row + (e - self.x0) as usize].fill(255);
+                    for xx in e..x1 {
+                        let qx = (xx as f32 + 0.5 - cx).abs() - hx;
+                        let d = qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - rad;
+                        self.put(xx, y, (0.5 - d).clamp(0.0, 1.0));
+                    }
+                    break;
+                }
+                let d = qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - rad;
+                self.put(x, y, (0.5 - d).clamp(0.0, 1.0));
+            }
+        }
+    }
+
+    /// An ellipse's fill inscribed in `r` (first-order SDF, AA edge).
+    pub fn ellipse(&mut self, r: FRect) {
+        let (rx, ry) = ((r.w / 2.0).max(0.5), (r.h / 2.0).max(0.5));
+        let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        let (x0, y0, x1, y1) = clamp_bbox(
+            (cx - rx - 1.0).floor() as i32,
+            (cy - ry - 1.0).floor() as i32,
+            (cx + rx + 1.0).ceil() as i32,
+            (cy + ry + 1.0).ceil() as i32,
+            (self.x0, self.y0, self.x1, self.y1),
+        );
+        for y in y0..y1 {
+            let py = y as f32 + 0.5 - cy;
+            for x in x0..x1 {
+                let px = x as f32 + 0.5 - cx;
+                let (gx, gy) = (px / (rx * rx), py / (ry * ry));
+                let gnorm = 2.0 * (gx * gx + gy * gy).sqrt();
+                let k = (px / rx) * (px / rx) + (py / ry) * (py / ry);
+                let d = if gnorm < 1e-9 { -rx.min(ry) } else { (k - 1.0) / gnorm };
+                self.put(x, y, (0.5 - d).clamp(0.0, 1.0));
+            }
+        }
+    }
+
+    /// An ellipse's outline of `width` (the coverage `stroke_ellipse` draws).
+    pub fn ellipse_ring(&mut self, r: FRect, width: f32) {
+        let (rx, ry) = ((r.w / 2.0).max(0.5), (r.h / 2.0).max(0.5));
+        let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        let band = width.max(0.5) / 2.0 + 0.5;
+        let (x0, y0, x1, y1) = clamp_bbox(
+            (cx - rx - band).floor() as i32,
+            (cy - ry - band).floor() as i32,
+            (cx + rx + band).ceil() as i32,
+            (cy + ry + band).ceil() as i32,
+            (self.x0, self.y0, self.x1, self.y1),
+        );
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let (px, py) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
+                let (gx, gy) = (px / (rx * rx), py / (ry * ry));
+                let gnorm = 2.0 * (gx * gx + gy * gy).sqrt();
+                let k = (px / rx) * (px / rx) + (py / ry) * (py / ry);
+                let d = if gnorm < 1e-9 { f32::MAX } else { (k - 1.0) / gnorm };
+                self.put(x, y, (band - d.abs()).clamp(0.0, 1.0));
+            }
+        }
+    }
+
+    /// A disc's fill (exact distance, AA edge).
+    pub fn disc(&mut self, c: Pt, radius: f32) {
+        let (x0, y0, x1, y1) = clamp_bbox(
+            (c.x - radius - 1.0).floor() as i32,
+            (c.y - radius - 1.0).floor() as i32,
+            (c.x + radius + 1.0).ceil() as i32,
+            (c.y + radius + 1.0).ceil() as i32,
+            (self.x0, self.y0, self.x1, self.y1),
+        );
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let d = (x as f32 + 0.5 - c.x).hypot(y as f32 + 0.5 - c.y) - radius;
+                self.put(x, y, (0.5 - d).clamp(0.0, 1.0));
+            }
+        }
+    }
+
+    /// Lower the coverage by `o`'s (same window): a ring is a shape
+    /// minus the same shape inset.
+    pub fn cut(&mut self, o: &Mask) {
+        if (self.x0, self.y0, self.x1, self.y1) != (o.x0, o.y0, o.x1, o.y1) {
+            return;
+        }
+        for (a, b) in self.a.iter_mut().zip(&o.a) {
+            *a = a.saturating_sub(*b);
+        }
+    }
+
+    /// Every covered pixel: `f(x, y, coverage)` in image coordinates.
+    pub fn each(&self, mut f: impl FnMut(i32, i32, f32)) {
+        let w = (self.x1 - self.x0) as usize;
+        if w == 0 {
+            return;
+        }
+        for (r, row) in self.a.chunks_exact(w).enumerate() {
+            for (i, &v) in row.iter().enumerate() {
+                if v > 0 {
+                    f(self.x0 + i as i32, self.y0 + r as i32, v as f32 / 255.0);
+                }
+            }
+        }
+    }
+
+    /// Blend `c` through the mask, once per pixel.
+    pub fn blend(&self, sf: &mut Surf, c: C4, blend: Blend) {
+        let w = (self.x1 - self.x0) as usize;
+        if w == 0 {
+            return;
+        }
+        // Fully covered by an opaque normal color: the pixel is the color
+        // (what `blend_px` computes then), written directly.
+        let solid = (c.a == 255 && blend == Blend::Normal).then(|| {
+            let mut px = [0u8, 0, 0, 255];
+            for (v, i) in [c.r, c.g, c.b].into_iter().zip(sf.order.rgb_idx()) {
+                px[i] = v;
+            }
+            px
+        });
+        let (ox, oy, sw) = (sf.ox, sf.oy, sf.w as usize);
+        for (r, row) in self.a.chunks_exact(w).enumerate() {
+            let y = self.y0 + r as i32;
+            for (i, &v) in row.iter().enumerate() {
+                if v == 255
+                    && let Some(px) = solid
+                {
+                    // The mask lies inside the surface window.
+                    let at = ((y - oy) as usize * sw + (self.x0 + i as i32 - ox) as usize) * 4;
+                    if let Some(d) = sf.data.get_mut(at..at + 4) {
+                        d.copy_from_slice(&px);
+                    }
+                } else if v > 0 {
+                    sf.blend_px(self.x0 + i as i32, y, c, v as f32 / 255.0, blend);
+                }
+            }
+        }
+    }
+}
+
+/// Filled-outline coverage on a `w` x `h` grid (nonzero winding, exact
+/// area coverage): each edge deposits signed area into an accumulation
+/// buffer, and a running prefix sum yields per-pixel coverage. This is the
+/// font-rs / ab_glyph_rasterizer algorithm (same arithmetic, so glyphs
+/// come out as they did with ab_glyph); used for the baked UI font.
+///
+/// Derived from font-rs (Copyright 2015 Google Inc.) as modified in
+/// ab_glyph_rasterizer (Copyright 2020 Alex Butler), Apache License 2.0;
+/// adapted here to rustshot's buffers and outline format.
+pub struct Coverage {
+    w: usize,
+    h: usize,
+    a: Vec<f32>,
+}
+
+impl Coverage {
+    pub fn new(w: usize, h: usize) -> Self {
+        Coverage { w, h, a: vec![0.0; w * h + 4] }
+    }
+
+    fn add(&mut self, i: usize, v: f32) -> bool {
+        match self.a.get_mut(i) {
+            Some(p) => {
+                *p += v;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Edge `p0` -> `p1` in grid coordinates (y down).
+    pub fn line(&mut self, p0: Pt, p1: Pt) {
+        if (p0.y - p1.y).abs() <= f32::EPSILON {
+            return;
+        }
+        let (dir, p0, p1) = if p0.y < p1.y { (1.0, p0, p1) } else { (-1.0, p1, p0) };
+        let dxdy = (p1.x - p0.x) / (p1.y - p0.y);
+        let mut x = p0.x;
+        if p0.y < 0.0 {
+            x -= p0.y * dxdy;
+        }
+        // `as usize` saturates negative rows to 0.
+        for y in p0.y as usize..self.h.min(p1.y.ceil() as usize) {
+            let row = y * self.w;
+            let dy = ((y + 1) as f32).min(p1.y) - (y as f32).max(p0.y);
+            let xnext = x + dxdy * dy;
+            let d = dy * dir;
+            let (x0, x1) = if x < xnext { (x, xnext) } else { (xnext, x) };
+            let x0floor = x0.floor();
+            let x0i = x0floor as i32;
+            let x1ceil = x1.ceil();
+            let x1i = x1ceil as i32;
+            let start = row as isize + x0i as isize;
+            // An out-of-grid index abandons the rest of the row (and, as in
+            // the reference rasteriser, keeps `x` where it was).
+            if start < 0 {
+                continue;
+            }
+            let start = start as usize;
+            let at = |xi: i32| row.wrapping_add(xi as usize);
+            if x1i <= x0i + 1 {
+                let xmf = 0.5 * (x + xnext) - x0floor;
+                if !self.add(start, d - d * xmf) || !self.add(start + 1, d * xmf) {
+                    continue;
+                }
+            } else {
+                let s = (x1 - x0).recip();
+                let x0f = x0 - x0floor;
+                let a0 = 0.5 * s * (1.0 - x0f) * (1.0 - x0f);
+                let x1f = x1 - x1ceil + 1.0;
+                let am = 0.5 * s * x1f * x1f;
+                if !self.add(start, d * a0) {
+                    continue;
+                }
+                if x1i == x0i + 2 {
+                    if !self.add(start + 1, d * (1.0 - a0 - am)) {
+                        continue;
+                    }
+                } else {
+                    let a1 = s * (1.5 - x0f);
+                    if !self.add(start + 1, d * (a1 - a0)) {
+                        continue;
+                    }
+                    for xi in x0i + 2..x1i - 1 {
+                        self.add(at(xi), d * s);
+                    }
+                    let a2 = a1 + (x1i - x0i - 3) as f32 * s;
+                    if !self.add(at(x1i - 1), d * (1.0 - a2 - am)) {
+                        continue;
+                    }
+                }
+                if !self.add(at(x1i), d * am) {
+                    continue;
+                }
+            }
+            x = xnext;
+        }
+    }
+
+    /// Quadratic Bézier `p0` -> `p2` with control `p1`, flattened.
+    pub fn quad(&mut self, p0: Pt, p1: Pt, p2: Pt) {
+        let devx = p0.x - 2.0 * p1.x + p2.x;
+        let devy = p0.y - 2.0 * p1.y + p2.y;
+        let devsq = devx * devx + devy * devy;
+        if devsq < 0.333 {
+            self.line(p0, p2);
+            return;
+        }
+        let n = 1 + (3.0 * devsq).sqrt().sqrt().floor() as usize;
+        let lerp = |t: f32, a: Pt, b: Pt| Pt::new(a.x + t * (b.x - a.x), a.y + t * (b.y - a.y));
+        let (mut p, step, mut t) = (p0, (n as f32).recip(), 0.0);
+        for _ in 0..n - 1 {
+            t += step;
+            let pn = lerp(t, lerp(t, p0, p1), lerp(t, p1, p2));
+            self.line(p, pn);
+            p = pn;
+        }
+        self.line(p, p2);
+    }
+
+    /// Visit every cell with its coverage (0 = empty, 1 or more = full).
+    pub fn for_each(&self, mut f: impl FnMut(u32, u32, f32)) {
+        let mut acc = 0.0f32;
+        for (i, c) in self.a[..self.w * self.h].iter().enumerate() {
+            acc += c;
+            f((i % self.w) as u32, (i / self.w) as u32, acc.abs());
+        }
+    }
+}
+
+/// Signed distance from `p` to segment `a..b` (endpoints clamped).
+fn dist_seg(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
+    let (vx, vy) = (bx - ax, by - ay);
+    let (wx, wy) = (px - ax, py - ay);
+    let len2 = vx * vx + vy * vy;
+    let t = if len2 <= 1e-12 { 0.0 } else { ((wx * vx + wy * vy) / len2).clamp(0.0, 1.0) };
+    let (dx, dy) = (wx - t * vx, wy - t * vy);
+    (dx * dx + dy * dy).sqrt()
+}
+
+/// Intersect an integer range with the surface window (image coordinates).
+fn clamp_bbox(x0: i32, y0: i32, x1: i32, y1: i32, b: (i32, i32, i32, i32)) -> (i32, i32, i32, i32) {
+    (x0.max(b.0), y0.max(b.1), x1.min(b.2), y1.min(b.3))
+}

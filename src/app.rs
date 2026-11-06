@@ -4,27 +4,43 @@
 
 use crate::audio::Output;
 use crate::export::{self, Progress};
-use crate::paint::{Align, C, Canvas, Icon, Rect, Text, pixmap};
-use crate::player::{Playback, Source, Stills, Thumbs, Wake};
+use crate::mp4;
+use crate::paint::{Align, C, Canvas, Icon, Picture, Rect, Text};
+use crate::player;
+use crate::player::{Playback, Source, Stills, Thumbs};
+use crate::raster::Order;
+use crate::shell::{Button, CursorKind, Host, Key, Mods, Tick, Wake};
 use crate::split::{self, Marker, Plan};
 use crate::theme::{self, Theme};
-use crate::{ffmpeg, mp4};
-use std::num::NonZeroU32;
+use crate::uifb::Fb;
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tiny_skia::Pixmap;
-use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
-use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
-use winit::keyboard::{Key, ModifiersState, NamedKey};
-use winit::window::{CursorIcon, Window, WindowId};
 
-#[derive(Debug, Clone, Copy)]
-pub enum UserEvent {
-    Wake,
+/// A frame ready to show: BGRA, `w` * `h`.
+pub struct Frame<'a> {
+    pub w: u32,
+    pub h: u32,
+    pub bgra: &'a [u8],
+}
+
+/// The bands of the window, top to bottom: what a paint can redo alone.
+const HEADER: u8 = 1;
+const PREVIEW: u8 = 2;
+const CONTROLS: u8 = 4;
+const TIMELINE: u8 = 8;
+const ALL: u8 = HEADER | PREVIEW | CONTROLS | TIMELINE;
+/// Hits of what floats over the bands (the toast): redone with any paint.
+const OVER: u8 = 16;
+
+/// The corners of the preview and the picture in it, in logical pixels.
+const PREVIEW_RADIUS: f32 = 12.0;
+
+/// What a file dialog came back with, waiting for the app's thread.
+enum Dialog {
+    Open(Option<PathBuf>),
+    ExportTo(Option<PathBuf>),
 }
 
 /// What a click on a control does.
@@ -73,7 +89,7 @@ struct Doc {
     thumbs: Thumbs,
     peaks: Arc<Mutex<Vec<f32>>>,
     /// The picture shown and its time.
-    frame: Option<(Duration, Pixmap)>,
+    frame: Option<(Duration, Picture)>,
     last_still: u64,
     /// The timeline's visible range.
     view: (Duration, Duration),
@@ -133,14 +149,22 @@ fn layout(w: f32, h: f32, s: f32) -> Layout {
 }
 
 pub struct App {
-    proxy: EventLoopProxy<UserEvent>,
-    window: Option<Rc<Window>>,
-    surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
-    pm: Option<Pixmap>,
+    host: Box<dyn Host>,
+    /// A file dialog's answer, set from wherever it ran.
+    dialog: Arc<Mutex<Option<Dialog>>>,
+    /// Asked to quit (Ctrl+Q).
+    quit: bool,
+    /// The frame (BGRA), kept between paints.
+    canvas: Vec<u8>,
+    /// The bands to draw again.
+    dirty: Cell<u8>,
+    /// The band being drawn: what its controls' hits belong to.
+    part: u8,
     text: Option<Text>,
     theme: Theme,
     l: Layout,
-    ffmpeg: Option<PathBuf>,
+    /// Pictures and sound can be decoded here.
+    decoder: bool,
     audio: Option<Output>,
     doc: Option<Doc>,
     playhead: Duration,
@@ -152,8 +176,8 @@ pub struct App {
     join: bool,
     n: usize,
     mouse: (f32, f32),
-    mods: ModifiersState,
-    hits: Vec<(Rect, Act, &'static str)>,
+    mods: Mods,
+    hits: Vec<(Rect, Act, &'static str, u8)>,
     hover: Option<Act>,
     hover_since: Instant,
     pressed: Option<Act>,
@@ -164,23 +188,29 @@ pub struct App {
     toast: Option<Toast>,
     exporting: Option<Arc<Mutex<Progress>>>,
     drop_hover: bool,
-    pending_open: Option<PathBuf>,
     /// Quit after this long (tests and screenshots).
     autoclose: Option<Instant>,
 }
 
 impl App {
-    pub fn new(proxy: EventLoopProxy<UserEvent>, open: Option<PathBuf>) -> App {
+    /// The app in `host`'s window, opening `open`; `dark`: the OS's theme, if known.
+    pub fn new(host: Box<dyn Host>, dark: Option<bool>, open: Option<PathBuf>) -> App {
         let autoclose = std::env::var("MP4_SPLITTER_AUTOCLOSE_MS").ok().and_then(|v| v.parse().ok()).map(|ms| Instant::now() + Duration::from_millis(ms));
-        App {
-            proxy,
-            window: None,
-            surface: None,
-            pm: None,
+        let theme = theme::pick(dark);
+        host.set_colors(&theme);
+        let (w, h) = host.size();
+        let l = layout(w as f32, h as f32, host.scale());
+        let mut app = App {
+            host,
+            dialog: Arc::default(),
+            quit: false,
+            canvas: Vec::new(),
+            dirty: Cell::new(ALL),
+            part: HEADER,
             text: Some(Text::new()),
-            theme: theme::DARK,
-            l: Layout::default(),
-            ffmpeg: ffmpeg::find(),
+            theme,
+            l,
+            decoder: player::available(),
             audio: None,
             doc: None,
             playhead: Duration::ZERO,
@@ -191,7 +221,7 @@ impl App {
             join: false,
             n: 6,
             mouse: (-1.0, -1.0),
-            mods: ModifiersState::default(),
+            mods: Mods::default(),
             hits: Vec::new(),
             hover: None,
             hover_since: Instant::now(),
@@ -202,21 +232,44 @@ impl App {
             toast: None,
             exporting: None,
             drop_hover: false,
-            pending_open: open,
             autoclose,
+        };
+        if let Some(p) = open {
+            app.open(&p);
         }
+        app.redraw();
+        app
     }
 
     fn wake(&self) -> Wake {
-        let p = self.proxy.clone();
-        Arc::new(move || {
-            let _ = p.send_event(UserEvent::Wake);
-        })
+        self.host.wake()
     }
 
+    /// Draw everything again.
     fn redraw(&self) {
-        if let Some(w) = &self.window {
-            w.request_redraw();
+        self.dirty.set(ALL);
+        self.host.redraw(None);
+    }
+
+    /// The rows of a band.
+    fn rows(&self, part: u8) -> (u32, u32) {
+        let l = &self.l;
+        let (a, b) = match part {
+            HEADER => (0.0, l.header.bottom()),
+            PREVIEW => (l.header.bottom(), l.controls.y),
+            CONTROLS => (l.controls.y, l.tools.y),
+            _ => (l.tools.y, l.h),
+        };
+        (a.round().max(0.0) as u32, (b.round().max(0.0) as u32).min(l.h as u32))
+    }
+
+    /// Draw these bands again.
+    fn redraw_parts(&self, parts: u8) {
+        self.dirty.set(self.dirty.get() | parts);
+        for part in [HEADER, PREVIEW, CONTROLS, TIMELINE] {
+            if parts & part != 0 {
+                self.host.redraw(Some(self.rows(part)));
+            }
         }
     }
 
@@ -228,13 +281,15 @@ impl App {
     // --- files ---------------------------------------------------------------
 
     fn open_dialog(&mut self) {
-        let mut d = rfd::FileDialog::new().add_filter("Video", &["mp4", "m4v", "mov", "MP4", "M4V", "MOV"]).set_title("Open a video");
-        if let Some(dir) = self.doc.as_ref().and_then(|d| d.path.parent()) {
-            d = d.set_directory(dir);
-        }
-        if let Some(p) = d.pick_file() {
-            self.open(&p);
-        }
+        let dir = self.doc.as_ref().and_then(|d| d.path.parent()).map(Path::to_path_buf);
+        let (slot, wake) = (self.dialog.clone(), self.wake());
+        self.host.pick_file(
+            dir,
+            Box::new(move |p| {
+                *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(Dialog::Open(p));
+                wake();
+            }),
+        );
     }
 
     fn open(&mut self, path: &Path) {
@@ -252,7 +307,7 @@ impl App {
             self.say(format!("{} has nothing to play", file_name(path)), true, None);
             return;
         }
-        let src = Source { ffmpeg: self.ffmpeg.clone(), path: path.to_path_buf(), frames: Arc::new(info.frames.clone()), has_audio: info.has_audio };
+        let src = Source::new(path.to_path_buf(), &info);
         let s = self.l.s.max(1.0);
         let th = (60.0 * s).round() as u32;
         let (vw, vh) = info.size.unwrap_or((16, 9));
@@ -273,11 +328,9 @@ impl App {
         self.doc = Some(doc);
         self.playhead = Duration::ZERO;
         self.toast = None;
-        if let Some(w) = &self.window {
-            w.set_title(&format!("{} — MP4 Splitter", file_name(path)));
-        }
-        if self.ffmpeg.is_none() {
-            self.say("ffmpeg was not found: no pictures or sound, but splitting works. Install ffmpeg to see the video.", true, None);
+        self.host.set_title(&format!("{} — MP4 Splitter", file_name(path)));
+        if !self.decoder {
+            self.say(player::NO_DECODER_TOAST, true, None);
         }
         self.request_still();
         self.redraw();
@@ -288,14 +341,23 @@ impl App {
             return;
         }
         let Some(d) = &self.doc else { return self.open_dialog() };
-        let dir = if self.mods.shift_key() {
-            match rfd::FileDialog::new().set_title("Export the pieces to").set_directory(d.path.parent().unwrap_or(Path::new("."))).pick_folder() {
-                Some(dir) => dir,
-                None => return,
-            }
-        } else {
-            d.path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."))
-        };
+        let next_to = d.path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+        if self.mods.shift {
+            let (slot, wake) = (self.dialog.clone(), self.wake());
+            self.host.pick_folder(
+                Some(next_to),
+                Box::new(move |p| {
+                    *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(Dialog::ExportTo(p));
+                    wake();
+                }),
+            );
+            return;
+        }
+        self.export_to(next_to);
+    }
+
+    fn export_to(&mut self, dir: PathBuf) {
+        let Some(d) = &self.doc else { return };
         let pieces = d.plan.kept_pieces();
         let join = self.join && d.plan.on.len() > 1;
         let outs = if join { vec![split::joined_path(&d.path, &dir)] } else { split::output_paths(&d.path, &dir, pieces.len()) };
@@ -328,19 +390,19 @@ impl App {
     fn video_size(&self) -> (u32, u32) {
         let Some(d) = &self.doc else { return (0, 0) };
         let (vw, vh) = d.info.size.unwrap_or((16, 9));
-        let r = fit(vw as f32, vh as f32, self.l.preview);
-        // Never larger than the video; even sizes keep ffmpeg's scaler happy.
-        let k = (r.w / vw as f32).min(1.0);
-        let w = ((vw as f32 * k).round() as u32).max(2) & !1;
-        let h = ((vh as f32 * k).round() as u32).max(2) & !1;
-        (w, h)
+        let (r, _) = picture_rect(vw as f32, vh as f32, self.l.preview);
+        // Exactly the rectangle it is shown in, so it is copied pixel for pixel;
+        // never larger than the video (it is scaled up on screen then).
+        let (w, h) = if r.w >= vw as f32 { (vw, vh) } else { (r.w as u32, r.h as u32) };
+        // ffmpeg's scaler wants even sizes.
+        if cfg!(windows) { (w.max(2), h.max(2)) } else { (w.max(2) & !1, h.max(2) & !1) }
     }
 
     fn request_still(&mut self) {
         let size = self.video_size();
         let t = self.playhead;
         if let Some(d) = &mut self.doc {
-            if size.0 > 0 && d.src.ffmpeg.is_some() && !d.info.frames.is_empty() {
+            if size.0 > 0 && d.src.available && !d.info.frames.is_empty() {
                 d.last_still = d.stills.request(t, size);
             }
         }
@@ -407,7 +469,7 @@ impl App {
         } else {
             self.request_still();
         }
-        self.redraw();
+        self.redraw_parts(CONTROLS | TIMELINE);
     }
 
     fn step_frame(&mut self, dir: i32) {
@@ -648,36 +710,34 @@ impl App {
         self.redraw();
     }
 
-    fn key(&mut self, ev: &KeyEvent, el: &ActiveEventLoop) {
-        if ev.state != ElementState::Pressed {
-            return;
-        }
-        let ctrl = self.mods.control_key() || self.mods.super_key();
-        let shift = self.mods.shift_key();
-        match &ev.logical_key {
-            Key::Named(NamedKey::Space) => self.play(),
-            Key::Named(NamedKey::ArrowLeft) if ctrl => self.jump(-5.0),
-            Key::Named(NamedKey::ArrowRight) if ctrl => self.jump(5.0),
-            Key::Named(NamedKey::ArrowLeft) if shift => self.jump(-1.0),
-            Key::Named(NamedKey::ArrowRight) if shift => self.jump(1.0),
-            Key::Named(NamedKey::ArrowLeft) => self.step_frame(-1),
-            Key::Named(NamedKey::ArrowRight) => self.step_frame(1),
-            Key::Named(NamedKey::ArrowUp) | Key::Named(NamedKey::ArrowDown) => {
-                let dir = if matches!(ev.logical_key, Key::Named(NamedKey::ArrowDown)) { 1 } else { -1 };
+    /// A key went down.
+    pub fn on_key(&mut self, key: Key) {
+        let ctrl = self.mods.ctrl;
+        let shift = self.mods.shift;
+        match key {
+            Key::Space => self.play(),
+            Key::Left if ctrl => self.jump(-5.0),
+            Key::Right if ctrl => self.jump(5.0),
+            Key::Left if shift => self.jump(-1.0),
+            Key::Right if shift => self.jump(1.0),
+            Key::Left => self.step_frame(-1),
+            Key::Right => self.step_frame(1),
+            Key::Up | Key::Down => {
+                let dir = if key == Key::Down { 1 } else { -1 };
                 if let Some(t) = self.doc.as_ref().and_then(|d| split::step(&d.plan.edges(), self.playhead, dir)) {
                     self.seek(t);
                 }
             }
-            Key::Named(NamedKey::PageUp) | Key::Named(NamedKey::PageDown) => {
-                let dir = if matches!(ev.logical_key, Key::Named(NamedKey::PageDown)) { 1 } else { -1 };
+            Key::PageUp | Key::PageDown => {
+                let dir = if key == Key::PageDown { 1 } else { -1 };
                 if let Some(t) = self.doc.as_ref().and_then(|d| split::step(&d.info.keys, self.playhead, dir)) {
                     self.seek(t);
                 }
             }
-            Key::Named(NamedKey::Home) => self.seek(Duration::ZERO),
-            Key::Named(NamedKey::End) => self.seek(self.duration()),
-            Key::Named(NamedKey::Delete) | Key::Named(NamedKey::Backspace) => self.remove_at_playhead(),
-            Key::Named(NamedKey::Escape) => {
+            Key::Home => self.seek(Duration::ZERO),
+            Key::End => self.seek(self.duration()),
+            Key::Delete | Key::Backspace => self.remove_at_playhead(),
+            Key::Escape => {
                 if self.toast.is_some() {
                     self.toast = None;
                     self.redraw();
@@ -685,41 +745,36 @@ impl App {
                     self.pause();
                 }
             }
-            Key::Named(NamedKey::Enter) if ctrl => self.export(),
-            Key::Character(c) => {
-                let c = c.to_lowercase();
-                match c.as_str() {
-                    "o" if ctrl => self.open_dialog(),
-                    "e" | "s" if ctrl => self.export(),
-                    "q" | "w" if ctrl => el.exit(),
-                    "k" => self.play(),
-                    "j" => self.jump(-1.0),
-                    "l" => self.jump(1.0),
-                    "," => self.step_frame(-1),
-                    "." => self.step_frame(1),
-                    "i" | "[" => self.act(Act::MarkIn),
-                    "o" | "]" => self.act(Act::MarkOut),
-                    "s" | "c" => self.act(Act::Cut),
-                    "x" => self.remove_at_playhead(),
-                    "m" => self.act(Act::Mute),
-                    "n" => self.act(Act::Snap),
-                    "0" => self.act(Act::ClearCuts),
-                    "=" | "+" => self.zoom(1.0 / 1.5, self.playhead),
-                    "-" | "_" => self.zoom(1.5, self.playhead),
-                    "\\" => self.zoom(1e9, self.playhead),
-                    d if d.len() == 1 && ('2'..='9').contains(&d.chars().next().unwrap_or(' ')) => {
-                        self.act(Act::Preset(d.parse().unwrap_or(2)));
-                    }
-                    _ => {}
-                }
-            }
-            _ => {}
+            Key::Enter if ctrl => self.export(),
+            Key::Enter | Key::F1 => {}
+            Key::Char(c) => match c {
+                'o' if ctrl => self.open_dialog(),
+                'e' | 's' if ctrl => self.export(),
+                'q' | 'w' if ctrl => self.quit = true,
+                'k' => self.play(),
+                'j' => self.jump(-1.0),
+                'l' => self.jump(1.0),
+                ',' => self.step_frame(-1),
+                '.' => self.step_frame(1),
+                'i' | '[' => self.act(Act::MarkIn),
+                'o' | ']' => self.act(Act::MarkOut),
+                's' | 'c' => self.act(Act::Cut),
+                'x' => self.remove_at_playhead(),
+                'm' => self.act(Act::Mute),
+                'n' => self.act(Act::Snap),
+                '0' => self.act(Act::ClearCuts),
+                '=' | '+' => self.zoom(1.0 / 1.5, self.playhead),
+                '-' | '_' => self.zoom(1.5, self.playhead),
+                '\\' => self.zoom(1e9, self.playhead),
+                '2'..='9' => self.act(Act::Preset(c as usize - '0' as usize)),
+                _ => {}
+            },
         }
     }
 
-    fn mouse_down(&mut self, button: MouseButton) {
+    fn mouse_down(&mut self, button: Button) {
         let (x, y) = self.mouse;
-        if button == MouseButton::Right {
+        if button == Button::Right {
             if let Some(Marker::Cut(i)) = self.marker_at(x, y) {
                 if let Some(d) = &mut self.doc {
                     d.plan.remove_cut(i);
@@ -728,15 +783,12 @@ impl App {
             }
             return;
         }
-        if button == MouseButton::Middle {
+        if button == Button::Middle {
             if let Some(d) = &self.doc {
                 if self.l.card.contains(x, y) {
                     self.drag = Some(Drag::Pan(x, d.view.0, d.view.1));
                 }
             }
-            return;
-        }
-        if button != MouseButton::Left {
             return;
         }
         if let Some(a) = self.hit(x, y) {
@@ -789,9 +841,9 @@ impl App {
         }
     }
 
-    fn mouse_up(&mut self, button: MouseButton) {
+    fn mouse_up(&mut self, button: Button) {
         let (x, y) = self.mouse;
-        if button == MouseButton::Left {
+        if button == Button::Left {
             if let Some(a) = self.pressed.take() {
                 if self.hit(x, y) == Some(a) {
                     self.act(a);
@@ -813,56 +865,59 @@ impl App {
         self.hits.iter().rev().find(|h| h.0.contains(x, y)).map(|h| h.1)
     }
 
-    fn cursor(&self) -> CursorIcon {
+    fn cursor(&self) -> CursorKind {
         let (x, y) = self.mouse;
         if matches!(self.drag, Some(Drag::Marker(_))) || (self.drag.is_none() && self.marker_at(x, y).is_some()) {
-            return CursorIcon::EwResize;
+            return CursorKind::EwResize;
         }
         if matches!(self.drag, Some(Drag::Pan(..))) {
-            return CursorIcon::Grabbing;
+            return CursorKind::Grabbing;
         }
         if self.hit(x, y).is_some() {
-            return CursorIcon::Pointer;
+            return CursorKind::Pointer;
         }
-        CursorIcon::Default
+        CursorKind::Default
     }
 
     // --- painting ------------------------------------------------------------
 
-    fn paint(&mut self) {
-        let Some(window) = self.window.clone() else { return };
-        let size = window.inner_size();
-        let (w, h) = (size.width.max(1), size.height.max(1));
-        let s = window.scale_factor() as f32;
+    /// Draw what changed; the frame.
+    pub fn paint(&mut self) -> Frame<'_> {
+        let (w, h) = self.host.size();
+        let (w, h) = (w.max(1), h.max(1));
+        let s = self.host.scale();
         self.l = layout(w as f32, h as f32, s);
-        let mut pm = match self.pm.take() {
-            Some(p) if p.width() == w && p.height() == h => p,
-            _ => match Pixmap::new(w, h) {
-                Some(p) => p,
-                None => return,
-            },
-        };
+        let mut canvas = std::mem::take(&mut self.canvas);
+        let size = w as usize * h as usize * 4;
+        if canvas.len() != size {
+            canvas.resize(size, 0);
+            self.dirty.set(ALL);
+        }
         let mut text = self.text.take().unwrap_or_else(Text::new);
-        self.hits.clear();
-        {
-            let mut c = Canvas { pm: &mut pm, text: &mut text, s };
-            self.draw(&mut c);
+        let dirty = self.dirty.replace(0);
+        // A paint with nothing to draw (the window was uncovered) keeps them all.
+        if dirty != 0 {
+            self.hits.retain(|hit| hit.3 & dirty == 0 && hit.3 != OVER);
         }
-        if let Some(surface) = &mut self.surface {
-            if let (Some(nw), Some(nh)) = (NonZeroU32::new(w), NonZeroU32::new(h)) {
-                if surface.resize(nw, nh).is_ok() {
-                    if let Ok(mut buf) = surface.buffer_mut() {
-                        for (o, p) in buf.iter_mut().zip(pm.data().chunks_exact(4)) {
-                            *o = (p[0] as u32) << 16 | (p[1] as u32) << 8 | p[2] as u32;
-                        }
-                        let _ = buf.present();
-                    }
-                }
-            }
+        // Everything at once, or band by band (each on its own rows: what
+        // floats over them is cut to what is drawn).
+        let whole = [(ALL, 0, h)];
+        let bands: Vec<(u8, u32, u32)> = if dirty == ALL {
+            whole.to_vec()
+        } else {
+            [HEADER, PREVIEW, CONTROLS, TIMELINE].iter().filter(|p| dirty & **p != 0).map(|&p| (p, self.rows(p).0, self.rows(p).1)).collect()
+        };
+        for (part, y0, y1) in bands {
+            let row = w as usize * 4;
+            let Some(pixels) = canvas.get_mut(y0 as usize * row..y1 as usize * row) else { continue };
+            let fb = Fb::with_origin(pixels, w as usize, 0, y0 as i32, Order::Bgra);
+            let mut c = Canvas { fb, text: &mut text, s };
+            self.draw(&mut c, part);
         }
-        self.pm = Some(pm);
+        self.canvas = canvas;
         self.text = Some(text);
         self.last_paint = Instant::now();
+        Frame { w, h, bgra: &self.canvas }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -939,33 +994,55 @@ impl App {
             }
             (None, None) => {}
         }
-        self.hits.push((r, act, tip));
+        self.hits.push((r, act, tip, self.part));
     }
 
     fn hit_hover(&self, r: Rect) -> bool {
         r.contains(self.mouse.0, self.mouse.1) && self.drag.is_none()
     }
 
-    fn draw(&mut self, c: &mut Canvas) {
+    fn draw(&mut self, c: &mut Canvas, part: u8) {
         let t = self.theme;
         let l = self.l;
         let s = l.s;
         c.clear(t.bg);
-        self.draw_header(c);
-        // The stage.
-        c.rrect(l.preview, 12.0 * s, t.stage);
-        self.draw_preview(c);
-        if self.doc.is_some() {
-            self.draw_controls(c);
-            self.draw_tools(c);
+        if part & HEADER != 0 {
+            self.part = HEADER;
+            self.draw_header(c);
         }
-        c.shadow(l.card, 12.0 * s);
-        c.rrect(l.card, 12.0 * s, t.surface);
-        c.rrect_stroke(l.card, 12.0 * s, 1.0 * s, t.border);
-        self.draw_timeline(c);
-        let hint = "Space play · ← → frame · Shift 1 s · ↑ ↓ cuts · I / O start / end · S cut · Del remove · 2–9 split · wheel zoom";
-        let hint = if c.text.measure(hint, 12.0 * s) > l.hint.w { "Space play · ← → frame · I / O start / end · S cut · 2–9 split" } else { hint };
-        c.text(l.hint.cx(), l.hint.cy() + 4.0 * s, 12.0 * s, t.text_faint, hint, Align::Center);
+        if part & PREVIEW != 0 {
+            self.part = PREVIEW;
+            // The stage: only where a picture leaves bars for it.
+            let fills = self.doc.as_ref().is_some_and(|d| {
+                let (vw, vh) = d.info.size.unwrap_or((16, 9));
+                d.frame.is_some() && picture_rect(vw as f32, vh as f32, l.preview).1
+            });
+            if !fills {
+                c.rrect(snapped(l.preview), PREVIEW_RADIUS * s, t.stage);
+            }
+            self.draw_preview(c);
+        }
+        if self.doc.is_some() {
+            if part & CONTROLS != 0 {
+                self.part = CONTROLS;
+                self.draw_controls(c);
+            }
+            if part & TIMELINE != 0 {
+                self.part = TIMELINE;
+                self.draw_tools(c);
+            }
+        }
+        if part & TIMELINE != 0 {
+            self.part = TIMELINE;
+            c.shadow(l.card, 12.0 * s);
+            c.rrect(l.card, 12.0 * s, t.surface);
+            c.rrect_stroke(l.card, 12.0 * s, 1.0 * s, t.border);
+            self.draw_timeline(c);
+            let hint = "Space play · ← → frame · Shift 1 s · ↑ ↓ cuts · I / O start / end · S cut · Del remove · 2–9 split · wheel zoom";
+            let hint =
+                if c.text.measure(hint, 12.0 * s) > l.hint.w { "Space play · ← → frame · I / O start / end · S cut · 2–9 split" } else { hint };
+            c.text(l.hint.cx(), l.hint.cy() + 4.0 * s, 12.0 * s, t.text_faint, hint, Align::Center);
+        }
         self.draw_toast(c);
         self.draw_tooltip(c);
         if self.drop_hover {
@@ -1073,29 +1150,21 @@ impl App {
             c.icon(Icon::Film, Rect::new(r.cx() - 18.0 * s, r.y + 30.0 * s, 36.0 * s, 36.0 * s), crate::paint::hex(0xA3A7B3, 255));
             c.text(r.cx(), r.y + 98.0 * s, 15.0 * s, crate::paint::hex(0xECEEF3, 255), "Drop an MP4 here, or click to open one", Align::Center);
             c.text(r.cx(), r.y + 122.0 * s, 12.0 * s, crate::paint::hex(0x9296A3, 255), "Lossless: pieces are copied, never re-encoded", Align::Center);
-            if self.ffmpeg.is_none() {
-                c.text(
-                    l.preview.cx(),
-                    r.bottom() + 30.0 * s,
-                    12.0 * s,
-                    t.error,
-                    "ffmpeg was not found: install it to see pictures and hear sound",
-                    Align::Center,
-                );
+            if !self.decoder {
+                c.text(l.preview.cx(), r.bottom() + 30.0 * s, 12.0 * s, t.error, player::NO_DECODER_HINT, Align::Center);
             }
             return;
         };
         let (vw, vh) = d.info.size.unwrap_or((16, 9));
-        let r = fit(vw as f32, vh as f32, l.preview.inset(0.0, 0.0));
-        let r = Rect::new(r.x.round(), r.y.round(), r.w.round(), r.h.round());
+        let (r, _) = picture_rect(vw as f32, vh as f32, l.preview);
         match &d.frame {
-            Some((_, img)) => c.image(img, r, Some((r, 10.0 * s))),
+            Some((_, img)) => c.image(img, r, Some((r, PREVIEW_RADIUS * s))),
             None => {
-                c.rrect(r, 10.0 * s, crate::paint::hex(0xFFFFFF, 6));
+                c.rrect(r, PREVIEW_RADIUS * s, crate::paint::hex(0xFFFFFF, 6));
                 let msg = if d.info.frames.is_empty() {
                     "No video track (sound only)"
-                } else if d.src.ffmpeg.is_none() {
-                    "No preview: ffmpeg was not found"
+                } else if !d.src.available {
+                    player::NO_DECODER_PREVIEW
                 } else {
                     "Loading…"
                 };
@@ -1339,14 +1408,12 @@ impl App {
                     continue;
                 }
                 let cellr = Rect::new(x0, clip.y, x1 - x0, clip.h);
-                if let Some(p) = d.thumbs.get(key) {
-                    if let Some(img) = pixmap(p.w, p.h, p.rgba) {
-                        // Cover the cell, centred.
-                        let k = (cellr.w / img.width() as f32).max(clip.h / img.height() as f32);
-                        let (iw, ih) = (img.width() as f32 * k, img.height() as f32 * k);
-                        let dst = Rect::new(cellr.cx() - iw / 2.0, cellr.cy() - ih / 2.0, iw, ih);
-                        c.image(&img, dst, Some((cellr, 0.0)));
-                    }
+                if let Some(img) = d.thumbs.get(key) {
+                    // Cover the cell, centred.
+                    let k = (cellr.w / img.w as f32).max(clip.h / img.h as f32);
+                    let (iw, ih) = (img.w as f32 * k, img.h as f32 * k);
+                    let dst = Rect::new(cellr.cx() - iw / 2.0, cellr.cy() - ih / 2.0, iw, ih);
+                    c.image(&img, dst, Some((cellr, 0.0)));
                 }
                 c.line(x0, clip.y, x0, clip.bottom(), 1.0 * s, crate::paint::hex(0, 90));
             }
@@ -1358,7 +1425,7 @@ impl App {
         let wave = l.wave;
         c.line(track.x, wave.y, track.right(), wave.y, 1.0 * s, crate::paint::hex(0, 120));
         if !peaks.is_empty() {
-            let per = crate::ffmpeg::PEAKS_PER_SEC as f64;
+            let per = player::PEAKS_PER_SEC as f64;
             let mid = wave.cy();
             let amp = wave.h * 0.42;
             let step = (1.5 * s).max(1.0);
@@ -1378,7 +1445,7 @@ impl App {
                 }
                 x += step;
             }
-        } else if d.info.has_audio && d.src.ffmpeg.is_some() {
+        } else if d.info.has_audio && d.src.available {
             c.text(wave.cx(), wave.cy() + 4.0 * s, 11.0 * s, t.text_faint, "Reading the sound…", Align::Center);
         } else if !d.info.has_audio {
             c.text(wave.cx(), wave.cy() + 4.0 * s, 11.0 * s, t.text_faint, "No sound", Align::Center);
@@ -1456,7 +1523,8 @@ impl App {
             let full = format!("{}  ·  {}", i + 1, split::timecode(*b - *a));
             let lbl = if c.text.measure(&full, 11.0 * s) + 20.0 * s < x1 - x0 { full } else { (i + 1).to_string() };
             let tw = c.text.measure(&lbl, 11.0 * s);
-            let w = tw + 14.0 * s + 15.0 * s;
+            let one = pieces.len() == 1;
+            let w = tw + 14.0 * s + if one { 0.0 } else { 15.0 * s };
             let cx = (x0 + x1) / 2.0;
             let pr = Rect::new(cx - w / 2.0, l.labels.y + 5.0 * s, w, 18.0 * s);
             let hot = self.hover == Some(Act::Piece(i));
@@ -1464,13 +1532,21 @@ impl App {
             if hot {
                 c.rrect_stroke(pr, 9.0 * s, 1.0 * s, if on { t.accent } else { t.text_muted });
             }
-            let (ix, tx) = (pr.x + 6.0 * s, pr.x + 21.0 * s);
-            c.icon(if on { Icon::Close } else { Icon::Undo }, Rect::new(ix, pr.cy() - 5.5 * s, 11.0 * s, 11.0 * s), if on { t.accent } else { t.text_muted });
+            let (ix, tx) = (pr.x + 6.0 * s, pr.x + if one { 7.0 } else { 21.0 } * s);
+            if !one {
+                c.icon(
+                    if on { Icon::Close } else { Icon::Undo },
+                    Rect::new(ix, pr.cy() - 5.5 * s, 11.0 * s, 11.0 * s),
+                    if on { t.accent } else { t.text_muted },
+                );
+            }
             c.text(tx, pr.cy() + 4.0 * s, 11.0 * s, if on { t.accent } else { t.text_faint }, &lbl, Align::Left);
             if !on {
                 c.line(tx - 1.0 * s, pr.cy(), tx + tw + 1.0 * s, pr.cy(), 1.0 * s, t.text_muted);
             }
-            self.hits.push((pr, Act::Piece(i), if on { "Leave this piece out (Delete at the playhead)" } else { "Put this piece back" }));
+            if !one {
+                self.hits.push((pr, Act::Piece(i), if on { "Leave this piece out (Delete at the playhead)" } else { "Put this piece back" }, self.part));
+            }
         }
         // Where the pointer is.
         let (mx, my) = self.mouse;
@@ -1542,7 +1618,7 @@ impl App {
             c.rrect(br, 7.0 * s, if hover { t.accent_hover } else { t.accent });
             c.icon(Icon::Folder, Rect::new(br.x + 10.0 * s, br.cy() - 8.0 * s, 16.0 * s, 16.0 * s), t.on_accent);
             c.text(br.x + 32.0 * s, br.cy() + 4.5 * s, px, t.on_accent, "Show folder", Align::Left);
-            self.hits.push((br, Act::ShowFolder, ""));
+            self.hits.push((br, Act::ShowFolder, "", OVER));
             x += bw + 4.0 * s;
         }
         let cr = Rect::new(x, r.cy() - 13.0 * s, 26.0 * s, 26.0 * s);
@@ -1550,7 +1626,7 @@ impl App {
             c.rrect(cr, 7.0 * s, crate::paint::hex(0xFFFFFF, 20));
         }
         c.icon(Icon::Close, cr.inset(6.0 * s, 6.0 * s), t.tooltip_text.with_alpha(180));
-        self.hits.push((cr, Act::CloseToast, ""));
+        self.hits.push((cr, Act::CloseToast, "", OVER));
     }
 
     fn draw_tooltip(&mut self, c: &mut Canvas) {
@@ -1560,7 +1636,7 @@ impl App {
             return;
         }
         let (mx, my) = self.mouse;
-        let Some((r, _, tip)) = self.hits.iter().rev().find(|h| h.0.contains(mx, my)).cloned() else { return };
+        let Some((r, _, tip, _)) = self.hits.iter().rev().find(|h| h.0.contains(mx, my)).cloned() else { return };
         if tip.is_empty() {
             return;
         }
@@ -1585,33 +1661,6 @@ enum Style {
     Round,
 }
 
-/// Give the native title bar the app's colours (Windows 11; earlier versions
-/// ignore what they do not know and keep theirs).
-#[cfg(windows)]
-fn tint_title_bar(window: &Window, t: &Theme) {
-    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    #[link(name = "dwmapi")]
-    unsafe extern "system" {
-        fn DwmSetWindowAttribute(hwnd: isize, attribute: u32, value: *const std::ffi::c_void, size: u32) -> i32;
-    }
-    const USE_IMMERSIVE_DARK_MODE: u32 = 20;
-    const BORDER_COLOR: u32 = 34;
-    const CAPTION_COLOR: u32 = 35;
-    const TEXT_COLOR: u32 = 36;
-    let Ok(handle) = window.window_handle() else { return };
-    let RawWindowHandle::Win32(h) = handle.as_raw() else { return };
-    let colorref = |c: C| c.r as u32 | (c.g as u32) << 8 | (c.b as u32) << 16;
-    for (attribute, value) in
-        [(USE_IMMERSIVE_DARK_MODE, u32::from(t.dark)), (CAPTION_COLOR, colorref(t.bg)), (TEXT_COLOR, colorref(t.text)), (BORDER_COLOR, colorref(t.bg))]
-    {
-        // SAFETY: the window is alive, and `value` outlives the call and is the 4 bytes given.
-        let _ = unsafe { DwmSetWindowAttribute(h.hwnd.get(), attribute, (&raw const value).cast(), 4) };
-    }
-}
-
-#[cfg(not(windows))]
-fn tint_title_bar(_: &Window, _: &Theme) {}
-
 fn file_name(p: &Path) -> String {
     p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
@@ -1632,6 +1681,24 @@ fn fit(w: f32, h: f32, r: Rect) -> Rect {
     let k = (r.w / w.max(1.0)).min(r.h / h.max(1.0));
     let (fw, fh) = (w * k, h * k);
     Rect::new(r.cx() - fw / 2.0, r.cy() - fh / 2.0, fw, fh)
+}
+
+/// `r` on whole pixels.
+fn snapped(r: Rect) -> Rect {
+    let (x0, y0) = (r.x.round(), r.y.round());
+    Rect::new(x0, y0, r.right().round() - x0, r.bottom().round() - y0)
+}
+
+/// Where a `w` × `h` picture goes in the preview `p`: on whole pixels, sharing
+/// the preview's edges wherever it reaches them (bars of a pixel or two are
+/// not worth showing). The one rectangle for the picture, its corners and what
+/// is behind it; and whether it covers the preview altogether.
+fn picture_rect(w: f32, h: f32, p: Rect) -> (Rect, bool) {
+    let p = snapped(p);
+    let f = snapped(fit(w, h, p));
+    let (full_w, full_h) = (p.w - f.w <= 2.0, p.h - f.h <= 2.0);
+    let r = Rect::new(if full_w { p.x } else { f.x }, if full_h { p.y } else { f.y }, if full_w { p.w } else { f.w }, if full_h { p.h } else { f.h });
+    (r, full_w && full_h)
 }
 
 /// A step between labelled ticks that leaves them ~90 logical px apart.
@@ -1697,156 +1764,126 @@ fn round_corners_top(c: &mut Canvas, r: Rect, rad: f32, bg: C) {
     }
 }
 
-impl ApplicationHandler<UserEvent> for App {
-    fn resumed(&mut self, el: &ActiveEventLoop) {
-        if self.window.is_some() {
-            return;
-        }
-        let attrs = Window::default_attributes()
-            .with_title("MP4 Splitter")
-            .with_inner_size(LogicalSize::new(1180.0, 780.0))
-            .with_min_inner_size(LogicalSize::new(760.0, 560.0));
-        #[cfg(windows)]
-        let attrs = {
-            use winit::platform::windows::{IconExtWindows, WindowAttributesExtWindows};
-            // The icon embedded by build.rs: title bar and Alt+Tab, then the taskbar.
-            let icon = |_: ()| winit::window::Icon::from_resource(1, None).ok();
-            attrs.with_window_icon(icon(())).with_taskbar_icon(icon(()))
-        };
-        let window = match el.create_window(attrs) {
-            Ok(w) => Rc::new(w),
-            Err(e) => {
-                eprintln!("no window: {e}");
-                el.exit();
-                return;
-            }
-        };
-        self.theme = theme::pick(window.theme());
-        tint_title_bar(&window, &self.theme);
-        let ctx = match softbuffer::Context::new(window.clone()) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("no drawing surface: {e}");
-                el.exit();
-                return;
-            }
-        };
-        self.surface = softbuffer::Surface::new(&ctx, window.clone()).ok();
-        let size = window.inner_size();
-        self.l = layout(size.width as f32, size.height as f32, window.scale_factor() as f32);
-        self.window = Some(window);
-        if let Some(p) = self.pending_open.take() {
-            self.open(&p);
-        }
-        self.redraw();
-    }
-
-    fn user_event(&mut self, _el: &ActiveEventLoop, _ev: UserEvent) {
+impl App {
+    /// Something finished on another thread.
+    pub fn on_wake(&mut self) {
         // A still arrived?
         if let Some(d) = &mut self.doc {
             let got = d.stills.done.lock().ok().and_then(|mut g| g.take());
             if let Some((seq, t, p)) = got {
                 if seq == d.last_still && self.playing.is_none() {
-                    if let Some(img) = pixmap(p.w, p.h, p.rgba) {
-                        d.frame = Some((t, img));
-                    }
+                    d.frame = Some((t, p));
+                    self.redraw_parts(PREVIEW);
                 }
             }
         }
-        self.check_export();
+        let answer = self.dialog.lock().unwrap_or_else(|e| e.into_inner()).take();
+        match answer {
+            Some(Dialog::Open(Some(p))) => self.open(&p),
+            Some(Dialog::ExportTo(Some(dir))) => self.export_to(dir),
+            _ => {}
+        }
+        if self.exporting.is_some() {
+            self.check_export();
+            self.redraw_parts(HEADER);
+        }
+        // Thumbnails and the waveform come in here too; playing, the tick draws them.
+        if self.playing.is_none() {
+            self.redraw_parts(TIMELINE);
+        }
+    }
+
+    /// The window's size or scale changed.
+    pub fn on_resize(&mut self) {
+        let (w, h) = self.host.size();
+        self.l = layout(w as f32, h as f32, self.host.scale());
+        if self.playing.is_none() {
+            self.request_still();
+        }
         self.redraw();
     }
 
-    fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, ev: WindowEvent) {
-        match ev {
-            WindowEvent::CloseRequested => el.exit(),
-            WindowEvent::RedrawRequested => self.paint(),
-            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
-                if let Some(w) = &self.window {
-                    let size = w.inner_size();
-                    self.l = layout(size.width as f32, size.height as f32, w.scale_factor() as f32);
-                }
-                if self.playing.is_none() {
-                    self.request_still();
-                }
-                self.redraw();
-            }
-            WindowEvent::ThemeChanged(th) => {
-                self.theme = theme::pick(Some(th));
-                if let Some(w) = &self.window {
-                    tint_title_bar(w, &self.theme);
-                }
-                self.redraw();
-            }
-            WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
-            WindowEvent::KeyboardInput { event, .. } => self.key(&event, el),
-            WindowEvent::CursorMoved { position, .. } => {
-                let p = (position.x as f32, position.y as f32);
-                let before = self.hit(self.mouse.0, self.mouse.1);
-                self.mouse = p;
-                let now = self.hit(p.0, p.1);
-                if now != before {
-                    self.hover = now;
-                    self.hover_since = Instant::now();
-                }
-                if self.drag.is_some() {
-                    self.drag_to(p.0);
-                }
-                if let Some(w) = &self.window {
-                    w.set_cursor(self.cursor());
-                }
-                self.redraw();
-            }
-            WindowEvent::CursorLeft { .. } => {
-                self.mouse = (-1.0, -1.0);
-                self.redraw();
-            }
-            WindowEvent::MouseInput { state, button, .. } => match state {
-                ElementState::Pressed => self.mouse_down(button),
-                ElementState::Released => self.mouse_up(button),
-            },
-            WindowEvent::MouseWheel { delta, .. } => {
-                let (dx, dy) = match delta {
-                    MouseScrollDelta::LineDelta(x, y) => (x as f64, y as f64),
-                    MouseScrollDelta::PixelDelta(p) => (p.x / 40.0, p.y / 40.0),
-                };
-                let (mx, my) = self.mouse;
-                if self.l.card.contains(mx, my) {
-                    if self.mods.shift_key() || dx.abs() > dy.abs() {
-                        let by = if dx.abs() > dy.abs() { -dx } else { -dy };
-                        self.pan(by as f32 * 60.0 * self.l.s);
-                    } else {
-                        let at = self.t_of(mx);
-                        self.zoom(1.2f64.powf(-dy), at);
-                    }
-                } else if self.l.preview.contains(mx, my) && self.doc.is_some() && dy != 0.0 {
-                    // Over the picture: frame by frame.
-                    self.step_frame(if dy < 0.0 { 1 } else { -1 });
-                }
-            }
-            WindowEvent::HoveredFile(_) => {
-                self.drop_hover = true;
-                self.redraw();
-            }
-            WindowEvent::HoveredFileCancelled => {
-                self.drop_hover = false;
-                self.redraw();
-            }
-            WindowEvent::DroppedFile(p) => {
-                self.drop_hover = false;
-                self.open(&p);
-            }
-            _ => {}
+    /// The OS's theme changed.
+    pub fn on_theme(&mut self, dark: Option<bool>) {
+        self.theme = theme::pick(dark);
+        self.host.set_colors(&self.theme);
+        self.redraw();
+    }
+
+    pub fn on_mods(&mut self, m: Mods) {
+        self.mods = m;
+    }
+
+    /// The pointer moved, in the window.
+    pub fn on_move(&mut self, x: f32, y: f32) {
+        let before = self.hit(self.mouse.0, self.mouse.1);
+        self.mouse = (x, y);
+        let now = self.hit(x, y);
+        if now != before {
+            self.hover = now;
+            self.hover_since = Instant::now();
+        }
+        if self.drag.is_some() {
+            self.drag_to(x);
+        }
+        self.host.set_cursor(self.cursor());
+        // What a pointer changes: a control's look, or the timeline's hover line.
+        if now != before || self.doc.is_none() {
+            self.redraw();
+        } else if self.l.card.contains(x, y) || self.drag.is_some() {
+            self.redraw_parts(TIMELINE);
         }
     }
 
-    fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+    /// The pointer left the window.
+    pub fn on_leave(&mut self) {
+        self.mouse = (-1.0, -1.0);
+        self.redraw();
+    }
+
+    pub fn on_button(&mut self, b: Button, down: bool) {
+        if down { self.mouse_down(b) } else { self.mouse_up(b) }
+    }
+
+    /// The wheel turned: lines, up and right positive.
+    pub fn on_wheel(&mut self, dx: f64, dy: f64) {
+        let (mx, my) = self.mouse;
+        if self.l.card.contains(mx, my) {
+            if self.mods.shift || dx.abs() > dy.abs() {
+                let by = if dx.abs() > dy.abs() { -dx } else { -dy };
+                self.pan(by as f32 * 60.0 * self.l.s);
+            } else {
+                let at = self.t_of(mx);
+                self.zoom(1.2f64.powf(-dy), at);
+            }
+        } else if self.l.preview.contains(mx, my) && self.doc.is_some() && dy != 0.0 {
+            // Over the picture: frame by frame.
+            self.step_frame(if dy < 0.0 { 1 } else { -1 });
+        }
+    }
+
+    /// A file is being dragged over the window, or no longer.
+    pub fn on_hover_file(&mut self, on: bool) {
+        self.drop_hover = on;
+        self.redraw();
+    }
+
+    /// A file was dropped on the window.
+    pub fn on_drop(&mut self, p: &Path) {
+        self.drop_hover = false;
+        self.open(p);
+    }
+
+    /// Between events: playback moves on. When to come back, and whether to quit.
+    pub fn tick(&mut self) -> Tick {
+        if self.quit {
+            return Tick { wait: None, exit: true };
+        }
         if self.autoclose.is_some_and(|t| Instant::now() >= t) {
             if let Ok(dir) = std::env::var("MP4_SPLITTER_SCREENSHOT") {
                 self.screenshot(Path::new(&dir));
             }
-            el.exit();
-            return;
+            return Tick { wait: None, exit: true };
         }
         // Playing into a piece that is switched off: on to the next kept one,
         // or stop when none is left.
@@ -1866,13 +1903,13 @@ impl ApplicationHandler<UserEvent> for App {
             let dur = self.doc.as_ref().map_or(Duration::ZERO, |d| d.info.duration);
             let mut fresh = false;
             if let Some(f) = pb.due(now) {
-                if let (Some(d), Some(img)) = (&mut self.doc, pixmap(f.pic.w, f.pic.h, f.pic.rgba)) {
-                    d.frame = Some((f.t, img));
+                if let Some(d) = &mut self.doc {
+                    d.frame = Some((f.t, f.pic));
                 }
                 fresh = true;
             }
             if fresh {
-                self.redraw();
+                self.redraw_parts(PREVIEW);
             }
             if now >= dur {
                 self.playhead = dur;
@@ -1888,7 +1925,7 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
                 if self.last_paint.elapsed() > Duration::from_millis(33) {
-                    self.redraw();
+                    self.redraw_parts(CONTROLS | TIMELINE);
                 }
                 earliest(&mut wait, Instant::now() + Duration::from_millis(5));
             }
@@ -1899,28 +1936,62 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(t) = &self.toast {
             earliest(&mut wait, t.at + Duration::from_secs(if t.error { 9 } else { 12 }) + Duration::from_millis(20));
         }
-        el.set_control_flow(match wait {
-            Some(t) => ControlFlow::WaitUntil(t),
-            None => ControlFlow::Wait,
-        });
         if self.toast.as_ref().is_some_and(|t| t.at.elapsed() > Duration::from_secs(if t.error { 9 } else { 12 })) {
             self.redraw();
         }
         if self.hover.is_some() && self.hover_since.elapsed() >= Duration::from_millis(550) && self.hover_since.elapsed() < Duration::from_millis(700) {
             self.redraw();
         }
+        Tick { wait, exit: false }
     }
-}
 
-impl App {
-    /// Save what the window shows as a PNG in `dir` (docs and CI).
     fn screenshot(&mut self, dir: &Path) {
         self.paint();
-        if let Some(pm) = &self.pm {
+        let (w, h) = self.host.size();
+        if w > 0 && self.canvas.len() == w as usize * h as usize * 4 {
             let name = std::env::var("MP4_SPLITTER_SCREENSHOT_NAME").unwrap_or_else(|_| "screenshot.png".into());
-            if let Err(e) = pm.save_png(dir.join(name)) {
+            if let Err(e) = std::fs::write(dir.join(name), crate::paint::png(w, h, &self.canvas)) {
                 eprintln!("screenshot: {e}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_picture_rectangle_stays_on_the_preview_at_any_scale() {
+        for scale in [1.0, 1.25, 1.5, 1.75, 2.0] {
+            for (ww, wh) in [(1180.0, 780.0), (1181.0, 781.0), (760.0, 560.0), (1919.0, 1033.0)] {
+                let l = layout(ww * scale, wh * scale, scale);
+                let p = snapped(l.preview);
+                for (vw, vh) in [(1920.0, 1080.0), (1148.0, 430.0), (1920.0, 720.0), (1080.0, 1920.0), (640.0, 480.0)] {
+                    let (r, fills) = picture_rect(vw, vh, l.preview);
+                    // Whole pixels, inside the preview.
+                    for v in [r.x, r.y, r.w, r.h] {
+                        assert_eq!(v, v.round(), "{r:?} at {scale}");
+                    }
+                    assert!(r.x >= p.x && r.y >= p.y && r.right() <= p.right() && r.bottom() <= p.bottom(), "{r:?} in {p:?} at {scale}");
+                    // Touching along at least one axis, exactly.
+                    assert!((r.x == p.x && r.w == p.w) || (r.y == p.y && r.h == p.h), "{r:?} in {p:?} at {scale}");
+                    assert_eq!(fills, r == p);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_picture_of_the_previews_shape_covers_it() {
+        let p = Rect::new(16.0, 56.0, 1148.0, 430.0);
+        assert_eq!(picture_rect(1148.0, 430.0, p), (p, true));
+        // A hair off: still no bars of a pixel.
+        assert_eq!(picture_rect(1920.0, 720.0, p), (p, true));
+        // Really narrower: bars at the sides, and top and bottom shared.
+        let (r, fills) = picture_rect(1280.0, 720.0, p);
+        assert!(!fills);
+        assert_eq!((r.y, r.h), (p.y, p.h));
+        assert!(r.w < p.w);
     }
 }

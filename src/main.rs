@@ -1,15 +1,46 @@
 //! MP4 Splitter: cut a video into pieces without re-encoding.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+#![allow(unknown_lints, clippy::collapsible_if, clippy::chunks_exact_to_as_chunks)]
 
 mod app;
+#[cfg(not(windows))]
 mod audio;
+#[cfg(windows)]
+#[path = "audio_win.rs"]
+mod audio;
+mod deflate;
+#[cfg(windows)]
+mod dialogs;
 mod export;
+#[cfg(any(not(windows), test))]
+#[cfg_attr(windows, allow(dead_code))]
 mod ffmpeg;
+#[allow(dead_code)]
+mod fonts;
+#[cfg(windows)]
+mod mf;
 mod mp4;
+#[allow(dead_code)]
+mod objects;
 mod paint;
+#[cfg(not(windows))]
 mod player;
+#[cfg(windows)]
+#[path = "player_win.rs"]
+mod player;
+#[allow(dead_code)]
+mod raster;
+mod shell;
 mod split;
 mod theme;
+#[allow(dead_code)]
+mod uifb;
+#[cfg(windows)]
+#[path = "shell_win.rs"]
+mod window;
+#[cfg(not(windows))]
+#[path = "shell_winit.rs"]
+mod window;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -46,16 +77,8 @@ fn main() {
         return;
     }
     let open = args.iter().find(|a| !a.starts_with('-')).map(PathBuf::from);
-    let event_loop = match winit::event_loop::EventLoop::<app::UserEvent>::with_user_event().build() {
-        Ok(el) => el,
-        Err(e) => {
-            eprintln!("error: can't open a window: {e}");
-            std::process::exit(1);
-        }
-    };
-    let mut app = app::App::new(event_loop.create_proxy(), open);
-    if let Err(e) = event_loop.run_app(&mut app) {
-        eprintln!("error: {e}");
+    if let Err(e) = window::run(open) {
+        eprintln!("error: can't open a window: {e}");
         std::process::exit(1);
     }
 }

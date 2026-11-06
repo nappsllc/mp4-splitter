@@ -36,7 +36,8 @@ without re-encoding.** Windows, macOS and Linux. Apache-2.0.
   with the keyboard.
 - **Dark and light themes** that follow your OS, with Rustshot's design
   tokens and the Inter font. Everything is drawn by the app itself (no GUI
-  toolkit, no web view); the release build is about 3.5 MB.
+  toolkit, no web view). On Windows it is hand-rolled on the OS's own APIs, like
+  Rustshot, and the release build is about 0.6 MB.
 
 ![The light theme](docs/splitter-light.png)
 
@@ -65,14 +66,20 @@ Pieces are saved as `<name>_part01.mp4`, `<name>_part02.mp4`, … (or
 `<name>_trimmed.mp4` for one piece), joined ones as `<name>_edited.mp4`, and
 never overwrite a file.
 
-## ffmpeg
+## Pictures and sound
 
-Cutting is done by MP4 Splitter itself. The **pictures and sound** in the
-window come from [ffmpeg](https://ffmpeg.org/download.html), which must be
-installed: `winget install ffmpeg` (Windows), `brew install ffmpeg` (macOS),
-`sudo apt install ffmpeg` (Debian, Ubuntu). It is looked for next to the app,
-on `PATH`, in Homebrew's folders, or at `MP4_SPLITTER_FFMPEG`. Without it the
-app still trims and splits, without previews.
+Cutting is done by MP4 Splitter itself, on every system. The **pictures and
+sound** in the window come from:
+
+- **Windows:** the system. Media Foundation decodes, on the GPU where it can,
+  and WASAPI plays. Nothing to install. H.265 needs Microsoft's HEVC extension,
+  and Windows "N" editions the Media Feature Pack; without them the app still
+  trims and splits, without previews.
+- **macOS and Linux:** [ffmpeg](https://ffmpeg.org/download.html), which must be
+  installed: `brew install ffmpeg` (macOS), `sudo apt install ffmpeg` (Debian,
+  Ubuntu). It is looked for next to the app, on `PATH`, in Homebrew's folders, or
+  at `MP4_SPLITTER_FFMPEG`. Without it the app still trims and splits, without
+  previews.
 
 ## Command line
 
@@ -88,16 +95,18 @@ mp4-splitter --info VIDEO               frames, key frames, size, codecs
 
 ## Building
 
-Rust 1.85 or newer (edition 2024). Linux also needs the ALSA headers
-(`libasound2-dev`) to build and `libxkbcommon-x11-0` to run.
+Rust 1.88 or newer (edition 2024). Linux also needs the ALSA headers
+(`libasound2-dev`) to build and `libxkbcommon-x11-0` to run. On Windows the
+Windows SDK's `rc.exe` embeds the icon and version info (without it, the build
+works and the exe has no icon).
 
 ```
 cargo build --release
-cargo test        # the cutting tests use ffmpeg to make and check files
+cargo test        # the tests use ffmpeg to make and check files, on every system
 ```
 
-The cutting code (`src/mp4.rs`) is adapted from
-[Rustshot](https://github.com/nappsllc/rustshot)'s trim. Files must be plain
+The cutting code (`src/mp4.rs`), the renderer and the Windows layers are adapted
+from [Rustshot](https://github.com/nappsllc/rustshot). Files must be plain
 (not fragmented) MP4, M4V or MOV; fragmented files are refused with a message.
 
 ## License
