@@ -978,7 +978,7 @@ mod tests {
         cut(&src, &dst, t, 5.0);
         let want = crate::ffmpeg::picture_at(&ff, &src, Duration::from_secs_f64(t), 320, 240, false).unwrap();
         let got = crate::ffmpeg::picture_at(&ff, &dst, Duration::ZERO, 320, 240, false).unwrap();
-        assert!(want.rgba == got.rgba, "the first picture of the piece is not the one at {t:.3} s");
+        assert!(want.bgra == got.bgra, "the first picture of the piece is not the one at {t:.3} s");
     }
 
     /// Every picture ffmpeg shows of `p`, 16 x 12 and grey.

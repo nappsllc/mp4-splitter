@@ -69,7 +69,7 @@ impl Playback {
                         }
                         let t = list.get(i).copied().unwrap_or_else(|| list.last().copied().unwrap_or_default());
                         i += 1;
-                        if tx.send(Frame { t, pic: Picture { w, h, rgba: buf } }).is_err() {
+                        if tx.send(Frame { t, pic: Picture { w, h, bgra: Arc::new(buf) } }).is_err() {
                             break;
                         }
                         wake2();

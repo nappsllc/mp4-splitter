@@ -5,7 +5,7 @@ edition = "2024"
 license = "Apache-2.0"
 description = "Tiny, good-looking, cross-platform tool that splits MP4 videos losslessly"
 repository = "https://github.com/nappsllc/mp4-splitter"
-rust-version = "1.85"
+rust-version = "1.88"
 
 [[bin]]
 name = "mp4-splitter"
@@ -13,12 +13,14 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-ab_glyph = "0.2"
-tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd", "png-format"] }
 winit = "0.30"
 softbuffer = "0.4"
 cpal = "0.15"
 rfd = "0.15"
+
+# The UI font is baked at build time (build.rs): no font parser at run time.
+[build-dependencies]
+ab_glyph = "0.2"
 
 [profile.release]
 strip = true

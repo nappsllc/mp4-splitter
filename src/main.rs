@@ -3,13 +3,23 @@
 
 mod app;
 mod audio;
+#[allow(dead_code)]
+mod deflate;
 mod export;
 mod ffmpeg;
+#[allow(dead_code)]
+mod fonts;
 mod mp4;
+#[allow(dead_code)]
+mod objects;
 mod paint;
 mod player;
+#[allow(dead_code)]
+mod raster;
 mod split;
 mod theme;
+#[allow(dead_code)]
+mod uifb;
 
 use std::path::PathBuf;
 use std::time::Duration;

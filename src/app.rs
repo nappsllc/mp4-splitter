@@ -4,17 +4,18 @@
 
 use crate::audio::Output;
 use crate::export::{self, Progress};
-use crate::paint::{Align, C, Canvas, Icon, Rect, Text, pixmap};
+use crate::paint::{Align, C, Canvas, Icon, Picture, Rect, Text};
 use crate::player::{Playback, Source, Stills, Thumbs, Wake};
+use crate::raster::Order;
 use crate::split::{self, Marker, Plan};
 use crate::theme::{self, Theme};
+use crate::uifb::Fb;
 use crate::{ffmpeg, mp4};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tiny_skia::Pixmap;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
@@ -73,7 +74,7 @@ struct Doc {
     thumbs: Thumbs,
     peaks: Arc<Mutex<Vec<f32>>>,
     /// The picture shown and its time.
-    frame: Option<(Duration, Pixmap)>,
+    frame: Option<(Duration, Picture)>,
     last_still: u64,
     /// The timeline's visible range.
     view: (Duration, Duration),
@@ -136,7 +137,8 @@ pub struct App {
     proxy: EventLoopProxy<UserEvent>,
     window: Option<Rc<Window>>,
     surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
-    pm: Option<Pixmap>,
+    /// The frame (BGRA), kept between paints.
+    canvas: Vec<u8>,
     text: Option<Text>,
     theme: Theme,
     l: Layout,
@@ -176,7 +178,7 @@ impl App {
             proxy,
             window: None,
             surface: None,
-            pm: None,
+            canvas: Vec::new(),
             text: Some(Text::new()),
             theme: theme::DARK,
             l: Layout::default(),
@@ -835,32 +837,28 @@ impl App {
         let (w, h) = (size.width.max(1), size.height.max(1));
         let s = window.scale_factor() as f32;
         self.l = layout(w as f32, h as f32, s);
-        let mut pm = match self.pm.take() {
-            Some(p) if p.width() == w && p.height() == h => p,
-            _ => match Pixmap::new(w, h) {
-                Some(p) => p,
-                None => return,
-            },
-        };
+        let mut canvas = std::mem::take(&mut self.canvas);
+        canvas.resize(w as usize * h as usize * 4, 0);
         let mut text = self.text.take().unwrap_or_else(Text::new);
         self.hits.clear();
         {
-            let mut c = Canvas { pm: &mut pm, text: &mut text, s };
+            let fb = Fb::with_origin(&mut canvas, w as usize, 0, 0, Order::Bgra);
+            let mut c = Canvas { fb, text: &mut text, s, stage: self.theme.stage };
             self.draw(&mut c);
         }
         if let Some(surface) = &mut self.surface {
             if let (Some(nw), Some(nh)) = (NonZeroU32::new(w), NonZeroU32::new(h)) {
                 if surface.resize(nw, nh).is_ok() {
                     if let Ok(mut buf) = surface.buffer_mut() {
-                        for (o, p) in buf.iter_mut().zip(pm.data().chunks_exact(4)) {
-                            *o = (p[0] as u32) << 16 | (p[1] as u32) << 8 | p[2] as u32;
+                        for (o, p) in buf.iter_mut().zip(canvas.chunks_exact(4)) {
+                            *o = p[0] as u32 | (p[1] as u32) << 8 | (p[2] as u32) << 16;
                         }
                         let _ = buf.present();
                     }
                 }
             }
         }
-        self.pm = Some(pm);
+        self.canvas = canvas;
         self.text = Some(text);
         self.last_paint = Instant::now();
     }
@@ -1339,14 +1337,12 @@ impl App {
                     continue;
                 }
                 let cellr = Rect::new(x0, clip.y, x1 - x0, clip.h);
-                if let Some(p) = d.thumbs.get(key) {
-                    if let Some(img) = pixmap(p.w, p.h, p.rgba) {
-                        // Cover the cell, centred.
-                        let k = (cellr.w / img.width() as f32).max(clip.h / img.height() as f32);
-                        let (iw, ih) = (img.width() as f32 * k, img.height() as f32 * k);
-                        let dst = Rect::new(cellr.cx() - iw / 2.0, cellr.cy() - ih / 2.0, iw, ih);
-                        c.image(&img, dst, Some((cellr, 0.0)));
-                    }
+                if let Some(img) = d.thumbs.get(key) {
+                    // Cover the cell, centred.
+                    let k = (cellr.w / img.w as f32).max(clip.h / img.h as f32);
+                    let (iw, ih) = (img.w as f32 * k, img.h as f32 * k);
+                    let dst = Rect::new(cellr.cx() - iw / 2.0, cellr.cy() - ih / 2.0, iw, ih);
+                    c.image(&img, dst, Some((cellr, 0.0)));
                 }
                 c.line(x0, clip.y, x0, clip.bottom(), 1.0 * s, crate::paint::hex(0, 90));
             }
@@ -1747,9 +1743,7 @@ impl ApplicationHandler<UserEvent> for App {
             let got = d.stills.done.lock().ok().and_then(|mut g| g.take());
             if let Some((seq, t, p)) = got {
                 if seq == d.last_still && self.playing.is_none() {
-                    if let Some(img) = pixmap(p.w, p.h, p.rgba) {
-                        d.frame = Some((t, img));
-                    }
+                    d.frame = Some((t, p));
                 }
             }
         }
@@ -1866,8 +1860,8 @@ impl ApplicationHandler<UserEvent> for App {
             let dur = self.doc.as_ref().map_or(Duration::ZERO, |d| d.info.duration);
             let mut fresh = false;
             if let Some(f) = pb.due(now) {
-                if let (Some(d), Some(img)) = (&mut self.doc, pixmap(f.pic.w, f.pic.h, f.pic.rgba)) {
-                    d.frame = Some((f.t, img));
+                if let Some(d) = &mut self.doc {
+                    d.frame = Some((f.t, f.pic));
                 }
                 fresh = true;
             }
@@ -1916,9 +1910,10 @@ impl App {
     /// Save what the window shows as a PNG in `dir` (docs and CI).
     fn screenshot(&mut self, dir: &Path) {
         self.paint();
-        if let Some(pm) = &self.pm {
+        let (w, h) = self.window.as_ref().map_or((0, 0), |w| (w.inner_size().width, w.inner_size().height));
+        if w > 0 && self.canvas.len() == w as usize * h as usize * 4 {
             let name = std::env::var("MP4_SPLITTER_SCREENSHOT_NAME").unwrap_or_else(|_| "screenshot.png".into());
-            if let Err(e) = pm.save_png(dir.join(name)) {
+            if let Err(e) = std::fs::write(dir.join(name), crate::paint::png(w, h, &self.canvas)) {
                 eprintln!("screenshot: {e}");
             }
         }
