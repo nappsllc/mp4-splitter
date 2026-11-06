@@ -820,6 +820,8 @@ pub struct Info {
     /// decoders that ignore edit lists.
     pub zero: Duration,
     pub audio_zero: Duration,
+    /// How many pictures come before time 0: decoded, not shown.
+    pub hidden: usize,
     /// Quarter turns clockwise to show the picture upright.
     pub turn: u8,
 }
@@ -873,6 +875,7 @@ pub fn info<R: Read + Seek>(src: &mut R) -> Result<Info> {
         let empty = to_dur(t.edit.empty as i64, movie);
         out.zero = to_dur(m0, t.timescale).saturating_sub(empty);
         let at = |i: usize| empty + to_dur(t.s.cts(i, dts[i]) - m0, t.timescale);
+        out.hidden = (0..t.s.len()).filter(|&i| t.s.cts(i, dts[i]) < m0).count();
         // Frames before the edit's start are decoded, not shown.
         let mut frames: Vec<Duration> = (0..t.s.len()).filter(|&i| t.s.cts(i, dts[i]) >= m0).map(at).collect();
         frames.sort_unstable();

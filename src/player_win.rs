@@ -8,7 +8,7 @@
 //! `t + zero` there ([`crate::mp4::Info::zero`]).
 
 use crate::audio::{self, Output};
-use crate::mf::{AudioReader, Decoded, VideoReader};
+use crate::mf::{AudioReader, Clock, Decoded, VideoReader};
 use crate::mp4::Info;
 use crate::paint::Picture;
 use crate::shell::Wake;
@@ -49,8 +49,8 @@ pub struct Source {
     has_frames: bool,
     zero: i64,
     audio_zero: i64,
-    /// A key frame past the first, in media time: how the system's clock is told.
-    key: Option<i64>,
+    /// How the readers relate their clock to the file's.
+    clock: Clock,
     turn: u8,
     /// Half a frame (100 ns): how near a picture's time must be.
     half: i64,
@@ -87,7 +87,12 @@ impl Source {
             has_frames: !info.frames.is_empty(),
             zero: hns(info.zero),
             audio_zero: hns(info.audio_zero),
-            key: info.keys.iter().find(|k| !k.is_zero()).map(|k| hns(*k) + hns(info.zero)),
+            clock: Clock {
+                zero: hns(info.zero),
+                key: info.keys.iter().find(|k| !k.is_zero()).map(|k| hns(*k) + hns(info.zero)),
+                hidden: info.hidden,
+                frame: (10_000_000.0 / info.fps()) as i64,
+            },
             turn: info.turn,
             half: (5_000_000.0 / info.fps()) as i64,
             decoder: Arc::default(),
@@ -100,9 +105,7 @@ impl Source {
         let mut g = self.decoder.slot.lock().unwrap_or_else(|e| e.into_inner());
         if g.v.is_none() {
             // On the GPU where it can be.
-            g.v = VideoReader::open(&self.path, self.gpu, self.turn, self.zero, self.key)
-                .or_else(|_| VideoReader::open(&self.path, false, self.turn, self.zero, self.key))
-                .ok();
+            g.v = VideoReader::open(&self.path, self.gpu, self.turn, self.clock).or_else(|_| VideoReader::open(&self.path, false, self.turn, self.clock)).ok();
             g.at = None;
         }
         g.used = Some(Instant::now());
@@ -687,7 +690,7 @@ mod tests {
         );
         for gpu in [true, false] {
             // Zero and no key: no shift, the source's own clock.
-            let mut v = match VideoReader::open(p, gpu, 0, 0, None) {
+            let mut v = match VideoReader::open(p, gpu, 0, Clock::default()) {
                 Ok(v) => v,
                 Err(e) => {
                     eprintln!("CLOCK   gpu {gpu}: no reader: {e:#}");
@@ -738,6 +741,30 @@ mod tests {
         crate::mp4::trim(&mut r, &mut w, Duration::from_secs_f64(0.5), Duration::from_secs_f64(3.5)).unwrap();
         drop(w);
         report_clock(&cut, (320, 240));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The readers' clock is the file's on any system: the first picture is
+    /// where the file says, read straight away or after going back to the
+    /// start, and so is a key frame.
+    #[test]
+    fn readers_keep_the_files_time() {
+        let Some(ff) = crate::ffmpeg::find() else { return };
+        let dir = std::env::temp_dir().join(format!("mp4s-clock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = fixture(&ff, &dir);
+        let i = info(&p);
+        let (zero, key) = (hns(i.zero), hns(i.keys[1]) + hns(i.zero));
+        let clock = Clock { zero, key: Some(key), hidden: i.hidden, frame: 333_333 };
+        for gpu in [true, false] {
+            let mut v = VideoReader::open(&p, gpu, 0, clock).unwrap();
+            let near = |got: i64, want: i64, what: &str| assert!((got - want).abs() <= 2, "gpu {gpu}, {what}: {got}, want {want}");
+            near(v.next().unwrap().ts, zero, "from the start");
+            v.seek(zero).unwrap();
+            near(v.next().unwrap().ts, zero, "after seeking to it");
+            v.seek(key).unwrap();
+            near(v.next().unwrap().ts, key, "at a key frame");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
