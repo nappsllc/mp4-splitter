@@ -61,6 +61,29 @@ foreach ($s in 44, 50, 128, 150, 512, 1024) {
     $b.Dispose()
 }
 
+# The Store package's tiles and icons, from the same drawing.
+$msix = Join-Path $dir 'msix'
+New-Item -ItemType Directory -Force $msix | Out-Null
+function Save-Mark([int]$Size, [string]$Name) {
+    $b = New-Mark $Size
+    $b.Save((Join-Path $msix $Name), [System.Drawing.Imaging.ImageFormat]::Png)
+    $b.Dispose()
+}
+Save-Mark 44 'Square44x44Logo.png'
+foreach ($s in 16, 24, 32, 48, 256) { Save-Mark $s "Square44x44Logo.targetsize-${s}_altform-unplated.png" }
+Save-Mark 150 'Square150x150Logo.png'
+Save-Mark 50 'StoreLogo.png'
+# The wide tile: the mark in the middle of a clear canvas.
+$wide = [System.Drawing.Bitmap]::new(310, 150, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+$g = [System.Drawing.Graphics]::FromImage($wide)
+$g.Clear([System.Drawing.Color]::Transparent)
+$b = New-Mark 150
+$g.DrawImage($b, 80, 0, 150, 150)
+$g.Dispose()
+$b.Dispose()
+$wide.Save((Join-Path $msix 'Wide310x150Logo.png'), [System.Drawing.Imaging.ImageFormat]::Png)
+$wide.Dispose()
+
 $ico = [System.IO.File]::Create((Join-Path $dir 'mp4-splitter.ico'))
 $w = [System.IO.BinaryWriter]::new($ico)
 $w.Write([int16]0); $w.Write([int16]1); $w.Write([int16]$images.Count)

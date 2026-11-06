@@ -80,9 +80,39 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # The Store's package, from the exe built above. Unsigned: the Store signs it.
+  # Without the Partner Center identity (docs/STORES.md) it is built with placeholders,
+  # named ...-PLACEHOLDER.msix, and stays off the release.
+  msix:
+    name: Store package
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-x86_64
+          path: exe
+
+      - name: Package
+        shell: pwsh
+        env:
+          MSIX_IDENTITY_NAME: ${{ vars.MSIX_IDENTITY_NAME }}
+          MSIX_PUBLISHER: ${{ vars.MSIX_PUBLISHER }}
+          MSIX_PUBLISHER_DISPLAY: ${{ vars.MSIX_PUBLISHER_DISPLAY }}
+        run: |
+          $env:MSIX_EXE = (Get-ChildItem exe\*.exe | Select-Object -First 1).FullName
+          packaging\windows\msix.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msix
+          path: dist/*.msix
+          if-no-files-found: error
+
   publish:
     if: github.ref_type == 'tag'
-    needs: build
+    needs: [build, msix]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -96,6 +126,8 @@ jobs:
       - name: Checksums
         working-directory: artifacts
         run: |
+          # A package with placeholder values is no use to anyone downloading it.
+          rm -f -- *PLACEHOLDER*
           sha256sum -- * > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
