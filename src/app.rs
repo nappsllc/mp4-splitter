@@ -3,6 +3,7 @@
 //! the trim handles, the cuts and the playhead.
 
 use crate::audio::Output;
+use crate::config::{Config, ThemeChoice};
 use crate::export::{self, Progress};
 use crate::mp4;
 use crate::paint::{Align, C, Canvas, Icon, Picture, Rect, Text};
@@ -74,6 +75,16 @@ enum Act {
     CloseToast,
     About,
     AboutLink,
+    Settings,
+    Theme(ThemeChoice),
+    Accent(usize),
+}
+
+/// A page over the window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Page {
+    About,
+    Settings,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -159,8 +170,12 @@ pub struct App {
     dialog: Arc<Mutex<Option<Dialog>>>,
     /// Asked to quit (Ctrl+Q).
     quit: bool,
-    /// The About page is showing.
-    about: bool,
+    /// The page showing over the window.
+    page: Option<Page>,
+    /// What is kept between runs.
+    config: Config,
+    /// The OS's theme, if known.
+    os_dark: Option<bool>,
     /// The frame (BGRA), kept between paints.
     canvas: Vec<u8>,
     /// The bands to draw again.
@@ -203,7 +218,8 @@ impl App {
     /// The app in `host`'s window, opening `open`; `dark`: the OS's theme, if known.
     pub fn new(host: Box<dyn Host>, dark: Option<bool>, open: Option<PathBuf>) -> App {
         let autoclose = std::env::var("MP4_SPLITTER_AUTOCLOSE_MS").ok().and_then(|v| v.parse().ok()).map(|ms| Instant::now() + Duration::from_millis(ms));
-        let theme = theme::pick(dark);
+        let config = Config::load();
+        let theme = theme::pick(dark, config.theme, config.accent);
         host.set_colors(&theme);
         let (w, h) = host.size();
         let l = layout(w as f32, h as f32, host.scale());
@@ -211,7 +227,9 @@ impl App {
             host,
             dialog: Arc::default(),
             quit: false,
-            about: false,
+            page: None,
+            config,
+            os_dark: dark,
             canvas: Vec::new(),
             dirty: Cell::new(ALL),
             part: HEADER,
@@ -690,10 +708,26 @@ impl App {
                 }
             }
             Act::CloseToast => self.toast = None,
-            Act::About => self.about = !self.about,
+            Act::About => self.page = if self.page == Some(Page::About) { None } else { Some(Page::About) },
+            Act::Settings => self.page = if self.page == Some(Page::Settings) { None } else { Some(Page::Settings) },
+            Act::Theme(choice) => {
+                self.config.theme = choice;
+                self.settings_changed();
+            }
+            Act::Accent(i) => {
+                self.config.accent = i;
+                self.settings_changed();
+            }
             Act::AboutLink => crate::links::open(crate::links::POWERNAPPS),
         }
         self.redraw();
+    }
+
+    /// Save the settings and show them.
+    fn settings_changed(&mut self) {
+        self.config.save();
+        self.theme = theme::pick(self.os_dark, self.config.theme, self.config.accent);
+        self.host.set_colors(&self.theme);
     }
 
     /// Switch a piece off (or back on).
@@ -725,9 +759,13 @@ impl App {
         if key == Key::F1 {
             return self.act(Act::About);
         }
-        if self.about {
+        if key == Key::Char(',') && self.mods.ctrl {
+            return self.act(Act::Settings);
+        }
+        if self.page.is_some() {
             if key == Key::Escape {
-                self.act(Act::About);
+                self.page = None;
+                self.redraw();
             }
             return;
         }
@@ -793,13 +831,13 @@ impl App {
 
     fn mouse_down(&mut self, button: Button) {
         let (x, y) = self.mouse;
-        // The About page takes every click: a click outside it closes it.
-        if self.about {
+        // A page takes every click: a click outside it closes it.
+        if let Some(page) = self.page {
             if button == Button::Left {
                 if let Some(a) = self.hit(x, y) {
                     self.pressed = Some(a);
-                } else if !self.about_rect(self.about_width()).contains(x, y) {
-                    self.about = false;
+                } else if !self.page_rect(page).contains(x, y) {
+                    self.page = None;
                 }
                 self.redraw();
             }
@@ -893,8 +931,8 @@ impl App {
     }
 
     fn hit(&self, x: f32, y: f32) -> Option<Act> {
-        // Under the About page, nothing else can be reached.
-        self.hits.iter().rev().find(|h| h.0.contains(x, y) && (!self.about || h.1 == Act::AboutLink)).map(|h| h.1)
+        // Under a page, nothing else can be reached.
+        self.hits.iter().rev().find(|h| h.0.contains(x, y) && (self.page.is_none() || h.3 == OVER)).map(|h| h.1)
     }
 
     fn cursor(&self) -> CursorKind {
@@ -1030,7 +1068,7 @@ impl App {
     }
 
     fn hit_hover(&self, r: Rect) -> bool {
-        r.contains(self.mouse.0, self.mouse.1) && self.drag.is_none()
+        r.contains(self.mouse.0, self.mouse.1) && self.drag.is_none() && (self.page.is_none() || self.part == OVER)
     }
 
     fn draw(&mut self, c: &mut Canvas, part: u8) {
@@ -1076,10 +1114,10 @@ impl App {
             c.text(l.hint.cx(), l.hint.cy() + 4.0 * s, 12.0 * s, t.text_faint, hint, Align::Center);
         }
         self.draw_toast(c);
-        if self.about {
-            self.draw_about(c);
-        } else {
-            self.draw_tooltip(c);
+        match self.page {
+            Some(Page::About) => self.draw_about(c),
+            Some(Page::Settings) => self.draw_settings(c),
+            None => self.draw_tooltip(c),
         }
         if self.drop_hover {
             c.rrect(l.preview.inset(6.0 * s, 6.0 * s), 12.0 * s, t.accent_soft);
@@ -1153,6 +1191,8 @@ impl App {
         let or = Rect::new(left - 8.0 * s - ow, by, ow, bh);
         let ir = Rect::new(or.x - 4.0 * s - bh, by, bh, bh);
         self.button(c, ir, Act::About, "About MP4 Splitter (F1)", Some(Icon::Info), None, Style::Ghost);
+        let gr = Rect::new(ir.x - 2.0 * s - bh, by, bh, bh);
+        self.button(c, gr, Act::Settings, "Settings (Ctrl+,)", Some(Icon::Gear), None, Style::Ghost);
         self.button(c, or, Act::Open, "Open a video (Ctrl+O), or drop one on the window", Some(Icon::Folder), Some("Open"), Style::Secondary);
         // What the file is; its name and the app's are in the window's title bar.
         if let Some(d) = &self.doc {
@@ -1170,7 +1210,7 @@ impl App {
                 meta.push("no sound".into());
             }
             meta.push(split::timecode(d.info.duration));
-            let meta = ellipsize(c.text, &meta.join("  ·  "), 12.0 * s, ir.x - x - 16.0 * s);
+            let meta = ellipsize(c.text, &meta.join("  ·  "), 12.0 * s, gr.x - x - 16.0 * s);
             c.text(x, cy + 4.5 * s, 12.0 * s, t.text_muted, &meta, Align::Left);
         }
     }
@@ -1667,27 +1707,67 @@ impl App {
         self.hits.push((cr, Act::CloseToast, "", OVER));
     }
 
-    /// How wide the About page is: its one-line description, with margins.
-    fn about_width(&self) -> f32 {
+    /// Where a page is.
+    fn page_rect(&self, page: Page) -> Rect {
         let s = self.l.s;
-        crate::fonts::ui_font().width(ABOUT_LINE, 13.0 * s) + 64.0 * s
+        let (w, h) = match page {
+            // Its one-line description, with margins.
+            Page::About => (Text::new().measure(ABOUT_LINE, 13.0 * s) + 64.0 * s, 296.0 * s),
+            Page::Settings => (420.0 * s, 212.0 * s),
+        };
+        Rect::new((self.l.w - w) / 2.0, (self.l.h - h) / 2.0, w, h)
     }
 
-    /// Where the About page is.
-    fn about_rect(&self, w: f32) -> Rect {
-        let h = 296.0 * self.l.s;
-        Rect::new((self.l.w - w) / 2.0, (self.l.h - h) / 2.0, w, h)
+    /// The dimmed window and the empty page.
+    fn draw_page(&mut self, c: &mut Canvas, page: Page) -> Rect {
+        let t = self.theme;
+        let s = self.l.s;
+        let (bx0, by0, bx1, by1) = c.fb.bounds();
+        c.rect(Rect::new(bx0 as f32, by0 as f32, (bx1 - bx0) as f32, (by1 - by0) as f32), crate::paint::hex(0, 120));
+        let r = self.page_rect(page);
+        c.shadow(r, 16.0 * s);
+        c.rrect(r, 16.0 * s, t.surface);
+        c.rrect_stroke(r, 16.0 * s, 1.0 * s, t.border);
+        self.part = OVER;
+        r
+    }
+
+    fn draw_settings(&mut self, c: &mut Canvas) {
+        let t = self.theme;
+        let s = self.l.s;
+        let r = self.draw_page(c, Page::Settings);
+        c.text(r.x + 24.0 * s, r.y + 40.0 * s, 18.0 * s, t.text, "Settings", Align::Left);
+        // Theme.
+        let y = r.y + 62.0 * s;
+        c.text(r.x + 24.0 * s, y + 21.0 * s, 13.0 * s, t.text_muted, "Theme", Align::Left);
+        let mut x = r.x + 120.0 * s;
+        for (choice, label) in [(ThemeChoice::System, "System"), (ThemeChoice::Dark, "Dark"), (ThemeChoice::Light, "Light")] {
+            let w = c.text.measure(label, 13.0 * s) + 24.0 * s;
+            let style = if self.config.theme == choice { Style::On } else { Style::Secondary };
+            self.button(c, Rect::new(x, y, w, 32.0 * s), Act::Theme(choice), "", None, Some(label), style);
+            x += w + 6.0 * s;
+        }
+        // Accent.
+        let y = y + 50.0 * s;
+        c.text(r.x + 24.0 * s, y + 21.0 * s, 13.0 * s, t.text_muted, "Accent", Align::Left);
+        let mut x = r.x + 120.0 * s;
+        let d = 28.0 * s;
+        for (i, (dark, light)) in theme::ACCENTS.iter().enumerate() {
+            let sw = Rect::new(x, y + 2.0 * s, d, d);
+            let col = if t.dark { *dark } else { *light };
+            c.circle(sw.cx(), sw.cy(), d / 2.0 - 3.0 * s, col);
+            if self.config.accent == i {
+                c.ring(sw.cx(), sw.cy(), d / 2.0 - 0.5 * s, 1.5 * s, col);
+            }
+            self.hits.push((sw, Act::Accent(i), "", OVER));
+            x += d + 8.0 * s;
+        }
     }
 
     fn draw_about(&mut self, c: &mut Canvas) {
         let t = self.theme;
         let s = self.l.s;
-        let (bx0, by0, bx1, by1) = c.fb.bounds();
-        c.rect(Rect::new(bx0 as f32, by0 as f32, (bx1 - bx0) as f32, (by1 - by0) as f32), crate::paint::hex(0, 120));
-        let r = self.about_rect(self.about_width());
-        c.shadow(r, 16.0 * s);
-        c.rrect(r, 16.0 * s, t.surface);
-        c.rrect_stroke(r, 16.0 * s, 1.0 * s, t.border);
+        let r = self.draw_page(c, Page::About);
         let cx = r.cx();
         // The mark, the name, the version, what it is.
         let m = 72.0 * s;
@@ -1900,8 +1980,8 @@ impl App {
 
     /// The OS's theme changed.
     pub fn on_theme(&mut self, dark: Option<bool>) {
-        self.theme = theme::pick(dark);
-        self.host.set_colors(&self.theme);
+        self.os_dark = dark;
+        self.settings_changed();
         self.redraw();
     }
 
@@ -1923,7 +2003,11 @@ impl App {
         }
         self.host.set_cursor(self.cursor());
         // What a pointer changes: a control's look, or the timeline's hover line.
-        if now != before || self.doc.is_none() {
+        if self.page.is_some() {
+            if now != before {
+                self.redraw();
+            }
+        } else if now != before || self.doc.is_none() {
             self.redraw();
         } else if self.l.card.contains(x, y) || self.drag.is_some() {
             self.redraw_parts(TIMELINE);
@@ -1942,7 +2026,7 @@ impl App {
 
     /// The wheel turned: lines, up and right positive.
     pub fn on_wheel(&mut self, dx: f64, dy: f64) {
-        if self.about {
+        if self.page.is_some() {
             return;
         }
         let (mx, my) = self.mouse;

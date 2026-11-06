@@ -56,7 +56,7 @@ pub const fn hex(v: u32, a: u8) -> C {
 }
 
 impl C {
-    pub fn with_alpha(self, a: u8) -> C {
+    pub const fn with_alpha(self, a: u8) -> C {
         C { a, ..self }
     }
     fn c4(self) -> C4 {
@@ -373,6 +373,22 @@ impl Canvas<'_> {
                 strokes.push(poly(&[(9.0, 14.0), (4.0, 9.0), (9.0, 4.0)], false));
                 strokes.push(poly(&[(4.0, 9.0), (14.5, 9.0), (18.0, 10.5), (20.0, 14.0), (18.0, 17.5), (14.5, 20.0), (11.0, 20.0)], false));
             }
+            Icon::Gear => {
+                rings.push((12.0, 12.0, 3.0));
+                rings.push((12.0, 12.0, 7.5));
+                for (a, b, c, d) in [
+                    (12.0, 2.5, 12.0, 4.5),
+                    (12.0, 19.5, 12.0, 21.5),
+                    (2.5, 12.0, 4.5, 12.0),
+                    (19.5, 12.0, 21.5, 12.0),
+                    (5.3, 5.3, 6.7, 6.7),
+                    (17.3, 17.3, 18.7, 18.7),
+                    (5.3, 18.7, 6.7, 17.3),
+                    (17.3, 6.7, 18.7, 5.3),
+                ] {
+                    strokes.push(poly(&[(a, b), (c, d)], false));
+                }
+            }
             Icon::Info => {
                 rings.push((12.0, 12.0, 9.5));
                 strokes.push(poly(&[(12.0, 11.5), (12.0, 16.5)], false));
@@ -432,6 +448,7 @@ pub enum Icon {
     KeyFrame,
     Trash,
     Film,
+    Gear,
     Info,
     Minus,
     Plus,

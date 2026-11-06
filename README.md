@@ -34,8 +34,8 @@ without re-encoding.** Windows, macOS and Linux. Apache-2.0.
   button.
 - **Playback with sound**, scrubbing with the mouse and frame-exact stepping
   with the keyboard.
-- **Dark and light themes** that follow your OS, with Rustshot's design
-  tokens and the Inter font. Everything is drawn by the app itself (no GUI
+- **Dark and light themes** that follow your OS, or your choice in Settings,
+  with Rustshot's design tokens, its accent colours and the Inter font. Everything is drawn by the app itself (no GUI
   toolkit, no web view). On Windows it is hand-rolled on the OS's own APIs, like
   Rustshot, and the release build is about 0.6 MB.
 
@@ -60,6 +60,7 @@ without re-encoding.** Windows, macOS and Linux. Apache-2.0.
 | <kbd>M</kbd> | Mute |
 | <kbd>+</kbd> <kbd>-</kbd> <kbd>\</kbd> | Zoom in / out / show everything |
 | <kbd>F1</kbd> | About |
+| <kbd>Ctrl</kbd>+<kbd>,</kbd> | Settings |
 | <kbd>Ctrl</kbd>+<kbd>O</kbd> | Open (or drop a file on the window) |
 | <kbd>Ctrl</kbd>+<kbd>E</kbd> | Export next to the video (<kbd>Shift</kbd>+click Export: choose a folder) |
 
