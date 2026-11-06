@@ -208,19 +208,80 @@ pub fn edits_found_out() -> bool {
     edits_known().is_some()
 }
 
-/// Sources differ: one that ignores edit lists gives every sample its time in
-/// the file's media timeline; one that honours them starts its clock where the
-/// edit list does, and drops what comes before. Seek to the key frame at `key`
-/// in the file: the first gives back exactly that time, the second takes it for
-/// a later one and gives back another key frame, on its own clock.
+/// Sources differ (measured on Windows 11 and Server 2025). One that ignores
+/// edit lists gives every sample its time in the file's media timeline. One
+/// that honours them starts its clock where the edit list does. Seek to the
+/// key frame at `key` in the file: the first gives back exactly that time, the
+/// second takes it for a later one and gives back a shifted time.
 fn honours_edits(key: i64, got: i64) -> bool {
     (got - key).abs() > 10_000 // 1 ms
 }
 
-/// What to add to the source's clock for a track whose edit list starts at
-/// `zero` in the media timeline. (Not known: as if ignored, the older systems' way.)
-fn edit_shift(zero: i64) -> i64 {
-    if edits_known() == Some(true) { zero } else { 0 }
+/// What the readers need to know of a file's pictures (all 100 ns).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Clock {
+    /// Where the edit list starts in the media timeline.
+    pub zero: i64,
+    /// A key frame past the first, in media time.
+    pub key: Option<i64>,
+    /// How many pictures come before the edit's start.
+    pub hidden: usize,
+    /// How long a picture lasts.
+    pub frame: i64,
+}
+
+/// Turns a source's picture times into the file's media timeline. A source
+/// that honours edit lists still delivers the pictures before the edit, but
+/// with clamped, unreliable times (measured on Server 2025: 0, 0, -666666, 0,
+/// 333333, 0...), so those are counted, not read: after a seek that lands on
+/// the first key frame, picture number `hidden` is the one at the edit's start.
+#[derive(Clone, Copy, Debug)]
+struct Stamps {
+    clock: Clock,
+    honours: bool,
+    /// The next picture is the first since a seek.
+    fresh: bool,
+    /// Hidden pictures still to come, and whether the one after them is next.
+    left: usize,
+    at_start: bool,
+}
+
+impl Stamps {
+    fn new(clock: Clock, honours: bool) -> Stamps {
+        Stamps { clock, honours, fresh: true, left: 0, at_start: false }
+    }
+
+    fn sought(&mut self) {
+        self.fresh = true;
+        self.left = 0;
+        self.at_start = false;
+    }
+
+    /// The file's time for the next picture, given the source's.
+    fn next(&mut self, ts: i64) -> i64 {
+        if !self.honours {
+            return ts;
+        }
+        let Clock { zero, hidden, frame, .. } = self.clock;
+        if std::mem::take(&mut self.fresh) && hidden > 0 && ts <= frame / 2 {
+            self.left = hidden;
+        }
+        if self.left > 0 {
+            let t = zero - self.left as i64 * frame;
+            self.left -= 1;
+            self.at_start = self.left == 0;
+            return t;
+        }
+        if std::mem::take(&mut self.at_start) {
+            return zero;
+        }
+        ts + zero
+    }
+
+    /// Where to seek in the source for a time in the file.
+    fn source_time(&self, hns: i64) -> i64 {
+        if self.honours { hns - self.clock.zero } else { hns }
+    }
 }
 
 /// How NV12 turns into BGRA: the colour matrix and the range.
@@ -332,8 +393,7 @@ pub struct VideoReader {
     yuv: Yuv,
     /// Quarter turns clockwise to show it upright.
     turn: u8,
-    /// Add to Media Foundation's clock for the file's ([`edit_shift`]).
-    shift: i64,
+    stamps: Stamps,
     _gpu: Option<Gpu>,
 }
 
@@ -341,11 +401,9 @@ pub struct VideoReader {
 unsafe impl Send for VideoReader {}
 
 impl VideoReader {
-    /// The reader for `path`, whose edit list starts at `zero` in its media
-    /// timeline (100 ns), with a key frame at `key`, if it has one past the
-    /// first. Times here are always the file's, whatever the system's MP4
-    /// source does with edit lists ([`honours_edits`]).
-    pub fn open(path: &Path, hardware: bool, turn: u8, zero: i64, key: Option<i64>) -> Result<VideoReader> {
+    /// The reader for `path`. Times here are always the file's, whatever the
+    /// system's MP4 source does with edit lists ([`honours_edits`], [`Stamps`]).
+    pub fn open(path: &Path, hardware: bool, turn: u8, clock: Clock) -> Result<VideoReader> {
         com_init();
         let gpu = if hardware { gpu() } else { None };
         let r = reader(path, gpu.as_ref())?;
@@ -373,15 +431,15 @@ impl VideoReader {
             let bt709 = if matrix == MFVideoTransferMatrix_BT601.0 as u32 { false } else { matrix == MFVideoTransferMatrix_BT709.0 as u32 || shown.1 >= 720 };
             let yuv = Yuv::of(bt709, range == MFNominalRange_0_255.0 as u32);
             // A key frame's time shows how this system's clock relates to the file's.
-            if let (Some(k), None) = (key.filter(|_| zero != 0), edits_known()) {
+            if let (Some(k), None) = (clock.key.filter(|_| clock.zero != 0), edits_known()) {
                 seek(&r, k)?;
                 if let Some((ts, _)) = next(&r, VIDEO) {
                     remember_edits(honours_edits(k, ts));
                 }
                 seek(&r, 0)?;
             }
-            let shift = edit_shift(zero);
-            Ok(VideoReader { r, coded, shown, stride, yuv, turn, shift, _gpu: gpu })
+            let stamps = Stamps::new(clock, edits_known() == Some(true));
+            Ok(VideoReader { r, coded, shown, stride, yuv, turn, stamps, _gpu: gpu })
         }
     }
 
@@ -393,12 +451,14 @@ impl VideoReader {
 
     /// Seek to the last key frame at or before `hns` in the file's time.
     pub fn seek(&mut self, hns: i64) -> Result<()> {
-        seek(&self.r, hns - self.shift)
+        self.stamps.sought();
+        seek(&self.r, self.stamps.source_time(hns))
     }
 
     /// The next picture in presentation order.
     pub fn next(&mut self) -> Option<Decoded> {
-        next(&self.r, VIDEO).map(|(ts, sample)| Decoded { ts: ts + self.shift, sample })
+        let (ts, sample) = next(&self.r, VIDEO)?;
+        Some(Decoded { ts: self.stamps.next(ts), sample })
     }
 
     /// The picture as BGRA, scaled to `size`.
@@ -439,8 +499,13 @@ pub struct AudioReader {
     r: IMFSourceReader,
     pub rate: u32,
     pub channels: u16,
-    /// Add to Media Foundation's clock for the file's ([`edit_shift`]).
-    shift: i64,
+    /// The sound's edit list's start in the media timeline, if the source's
+    /// clock starts there.
+    zero: Option<i64>,
+    /// Frames read since the very start, while reading from there: a source
+    /// that honours edit lists clamps what comes before the edit, so it is
+    /// counted, not read.
+    counted: Option<i64>,
 }
 
 // SAFETY: Media Foundation's objects are free-threaded; used by one thread at a time.
@@ -462,13 +527,16 @@ impl AudioReader {
             let cur = r.GetCurrentMediaType(AUDIO)?;
             let rate = cur.GetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND)?;
             let channels = cur.GetUINT32(&MF_MT_AUDIO_NUM_CHANNELS)? as u16;
-            Ok(AudioReader { r, rate, channels, shift: edit_shift(zero) })
+            let honours = edits_known() == Some(true);
+            Ok(AudioReader { r, rate, channels, zero: honours.then_some(zero), counted: honours.then_some(0) })
         }
     }
 
     /// Seek to `hns` in the file's time.
     pub fn seek(&mut self, hns: i64) -> Result<()> {
-        seek(&self.r, hns - self.shift)
+        let at = hns - self.zero.unwrap_or(0);
+        self.counted = (self.zero.is_some() && at <= 0).then_some(0);
+        seek(&self.r, at)
     }
 
     /// The next packet's time in the file (100 ns) and samples (interleaved).
@@ -481,7 +549,17 @@ impl AudioReader {
             buf.Lock(&mut data, None, Some(&mut len)).ok()?;
             let v = std::slice::from_raw_parts(data.cast::<u8>(), len as usize).chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
             let _ = buf.Unlock();
-            Some((ts + self.shift, v))
+            let v: Vec<f32> = v;
+            let ch = self.channels.max(1) as usize;
+            let at = match &mut self.counted {
+                Some(c) => {
+                    let t = (*c as i128 * 10_000_000 / self.rate.max(1) as i128) as i64;
+                    *c += (v.len() / ch) as i64;
+                    t
+                }
+                None => ts + self.zero.unwrap_or(0),
+            };
+            Some((at, v))
         }
     }
 }
@@ -527,26 +605,66 @@ mod tests {
         assert!(honours_edits(key, key - zero));
     }
 
-    /// With the clock taken from the file's edit list, a picture on either
-    /// kind of source lands at the same place in the file: asking for time 0
-    /// of the trimmed file above finds the frame there, not 15 frames on.
+    /// What Windows Server 2025 gave for a file trimmed with a 15-picture
+    /// lead-in (zero 5666666), on the GPU and in software: replayed here, where
+    /// the source behaves differently.
+    const SERVER_GPU: [i64; 20] = [0, 0, 0, 0, 0, 0, 0, 0, -666666, -333333, 0, 0, 0, 0, 0, 0, 333333, 666667, 1000000, 1333333];
+    const SERVER_SOFT: [i64; 20] = [0, 0, 0, 0, 0, 0, 0, 0, 333333, 0, 0, 0, 0, 0, 0, 0, 333333, 666667, 1000000, 1333333];
+    const CUT: Clock = Clock { zero: 5_666_666, key: None, hidden: 15, frame: 333_333 };
+
+    /// The first picture reaching a time, as the stills and playback find it.
+    fn first_reaching(stamps: &mut Stamps, source: &[i64], want: i64) -> usize {
+        let half = stamps.clock.frame / 2;
+        source.iter().position(|&ts| stamps.next(ts) + half >= want).unwrap()
+    }
+
     #[test]
-    fn times_mean_the_same_on_both_kinds_of_source() {
-        let frame = 333_333i64;
-        // The file's media time of frame `n` of the source; 15 is the first shown.
-        let raw = |n: i64| 666_667 + n * frame;
-        let zero = raw(15);
-        // What each kind of source stamps that frame with.
-        let ignoring = |n: i64| raw(n);
-        let honouring = |n: i64| raw(n) - zero;
-        let want = zero; // time 0
-        for (stamp, shift) in [(&ignoring as &dyn Fn(i64) -> i64, 0), (&honouring, zero)] {
-            // The first of the frames, in order, that reaches the time asked for.
-            let found = (0..120).find(|&n| stamp(n) + shift + frame / 2 >= want);
-            assert_eq!(found, Some(15));
-            // And where a seek for it goes on the source's clock.
-            assert_eq!(want - shift, stamp(15));
+    fn a_hidden_lead_in_is_counted_not_read() {
+        for source in [SERVER_GPU, SERVER_SOFT] {
+            // Time 0 is picture 15, not the first stamped 0 and not 15 pictures on.
+            assert_eq!(first_reaching(&mut Stamps::new(CUT, true), &source, CUT.zero), 15);
+            // And the ones after it, whatever came before.
+            for k in 1..4 {
+                assert_eq!(first_reaching(&mut Stamps::new(CUT, true), &source, CUT.zero + k * CUT.frame), 15 + k as usize);
+            }
+            // Times come out in order, the garbage gone.
+            let mut s = Stamps::new(CUT, true);
+            let times: Vec<i64> = source.iter().map(|&ts| s.next(ts)).collect();
+            assert!(times.windows(2).all(|w| w[0] < w[1]), "{times:?}");
+            assert_eq!(times[15], CUT.zero);
+            assert_eq!(times[16], CUT.zero + 333333);
         }
+    }
+
+    #[test]
+    fn a_seek_past_the_lead_in_reads_the_clock() {
+        let mut s = Stamps::new(CUT, true);
+        assert_eq!(s.source_time(CUT.zero + 333333), 333333);
+        s.sought();
+        // Measured: key frame 16, stamped 333333.
+        assert_eq!(s.next(333333), CUT.zero + 333333);
+        assert_eq!(s.next(666667), CUT.zero + 666667);
+        // Back to the start: counted again.
+        s.sought();
+        assert_eq!(s.next(0), CUT.zero - 15 * CUT.frame);
+    }
+
+    #[test]
+    fn a_file_with_no_lead_in_just_shifts() {
+        // Measured on Server 2025: two frames of delay, nothing hidden.
+        let plain = Clock { zero: 666_666, key: None, hidden: 0, frame: 333_333 };
+        let mut s = Stamps::new(plain, true);
+        assert_eq!(s.next(0), 666_666);
+        assert_eq!(s.next(333333), 999_999);
+    }
+
+    #[test]
+    fn a_source_that_ignores_edits_is_left_alone() {
+        let mut s = Stamps::new(CUT, false);
+        assert_eq!(s.source_time(CUT.zero), CUT.zero);
+        // Measured on Windows 11: each picture at its time in the file.
+        assert_eq!(s.next(666_666), 666_666);
+        assert_eq!(s.next(999_999), 999_999);
     }
 
     #[test]
@@ -609,7 +727,7 @@ mod tests {
             let info = crate::mp4::info(&mut std::io::BufReader::new(std::fs::File::open(p).unwrap())).unwrap();
             println!("{name}: info frames {:?}.. of {}; keys {:?}", &info.frames[..3], info.frames.len(), &info.keys[..2]);
             for hw in [false, true] {
-                let mut v = VideoReader::open(p, hw, 0, 0, None).unwrap();
+                let mut v = VideoReader::open(p, hw, 0, Clock::default()).unwrap();
                 println!("  hw={hw} coded {:?} shown {:?} stride {}", v.coded, v.shown, v.stride);
                 let mut got = Vec::new();
                 for _ in 0..4 {
