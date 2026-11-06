@@ -1,0 +1,87 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: Linux, os: ubuntu-latest, exe: mp4-splitter, artifact: mp4-splitter-linux-x86_64 }
+          - { name: Windows, os: windows-latest, exe: mp4-splitter.exe, artifact: mp4-splitter-windows-x86_64 }
+          - { name: macOS, os: macos-latest, exe: mp4-splitter, artifact: mp4-splitter-macos-arm64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      # ffmpeg: the tests cut files it makes and check them with it.
+      - name: Install ffmpeg and ALSA headers (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg libasound2-dev xvfb xauth libxkbcommon-x11-0
+      - name: Install ffmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg
+      - name: Install ffmpeg (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg -y --no-progress
+
+      - name: Format
+        if: runner.os == 'Linux'
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        shell: bash
+        run: |
+          ffmpeg -hide_banner -version | head -n1
+          cargo test -- --nocapture 2>&1 | tee test.log
+          if grep -q "SKIP:" test.log; then echo "::error::the cutting tests were skipped (no ffmpeg)"; exit 1; fi
+      - name: Build (release)
+        run: cargo build --release
+
+      # The window under Xvfb: open a video, split it in 3 from the
+      # keyboard, export, and save a screenshot.
+      - name: Window smoke test (Linux, Xvfb)
+        if: runner.os == 'Linux'
+        timeout-minutes: 5
+        run: |
+          set -e
+          mkdir -p shots && cd shots
+          ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=size=1280x720:rate=30:duration=10" \
+            -f lavfi -i "sine=frequency=440:duration=10" -c:v libx264 -g 30 -c:a aac -shortest demo.mp4
+          MP4_SPLITTER_AUTOCLOSE_MS=6000 MP4_SPLITTER_SCREENSHOT="$PWD" \
+            xvfb-run -a -s "-screen 0 1400x900x24" ../target/release/mp4-splitter demo.mp4
+          test -s screenshot.png
+          ../target/release/mp4-splitter --split 3 demo.mp4
+          for f in demo_part01.mp4 demo_part02.mp4 demo_part03.mp4; do
+            d=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$f")
+            echo "::notice title=Lossless split::$f $d s"
+            ffmpeg -v error -i "$f" -f null - 2>err.txt; test ! -s err.txt
+          done
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: screenshot-linux
+          path: shots/screenshot.png
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            target/release/${{ matrix.exe }}
+            LICENSE
+            NOTICE
+            README.md
