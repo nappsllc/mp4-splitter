@@ -34,6 +34,9 @@ const ALL: u8 = HEADER | PREVIEW | CONTROLS | TIMELINE;
 /// Hits of what floats over the bands (the toast): redone with any paint.
 const OVER: u8 = 16;
 
+/// What the About page says the app is.
+const ABOUT_LINE: &str = "Cut videos into pieces without re-encoding. Tiny, draws its own pixels, runs on Windows, macOS and Linux.";
+
 /// The corners of the preview and the picture in it, in logical pixels.
 const PREVIEW_RADIUS: f32 = 12.0;
 
@@ -69,6 +72,8 @@ enum Act {
     ClearCuts,
     ShowFolder,
     CloseToast,
+    About,
+    AboutLink,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -154,6 +159,8 @@ pub struct App {
     dialog: Arc<Mutex<Option<Dialog>>>,
     /// Asked to quit (Ctrl+Q).
     quit: bool,
+    /// The About page is showing.
+    about: bool,
     /// The frame (BGRA), kept between paints.
     canvas: Vec<u8>,
     /// The bands to draw again.
@@ -204,6 +211,7 @@ impl App {
             host,
             dialog: Arc::default(),
             quit: false,
+            about: false,
             canvas: Vec::new(),
             dirty: Cell::new(ALL),
             part: HEADER,
@@ -682,6 +690,8 @@ impl App {
                 }
             }
             Act::CloseToast => self.toast = None,
+            Act::About => self.about = !self.about,
+            Act::AboutLink => crate::links::open(crate::links::POWERNAPPS),
         }
         self.redraw();
     }
@@ -712,6 +722,15 @@ impl App {
 
     /// A key went down.
     pub fn on_key(&mut self, key: Key) {
+        if key == Key::F1 {
+            return self.act(Act::About);
+        }
+        if self.about {
+            if key == Key::Escape {
+                self.act(Act::About);
+            }
+            return;
+        }
         let ctrl = self.mods.ctrl;
         let shift = self.mods.shift;
         match key {
@@ -774,6 +793,18 @@ impl App {
 
     fn mouse_down(&mut self, button: Button) {
         let (x, y) = self.mouse;
+        // The About page takes every click: a click outside it closes it.
+        if self.about {
+            if button == Button::Left {
+                if let Some(a) = self.hit(x, y) {
+                    self.pressed = Some(a);
+                } else if !self.about_rect(self.about_width()).contains(x, y) {
+                    self.about = false;
+                }
+                self.redraw();
+            }
+            return;
+        }
         if button == Button::Right {
             if let Some(Marker::Cut(i)) = self.marker_at(x, y) {
                 if let Some(d) = &mut self.doc {
@@ -862,7 +893,8 @@ impl App {
     }
 
     fn hit(&self, x: f32, y: f32) -> Option<Act> {
-        self.hits.iter().rev().find(|h| h.0.contains(x, y)).map(|h| h.1)
+        // Under the About page, nothing else can be reached.
+        self.hits.iter().rev().find(|h| h.0.contains(x, y) && (!self.about || h.1 == Act::AboutLink)).map(|h| h.1)
     }
 
     fn cursor(&self) -> CursorKind {
@@ -1044,7 +1076,11 @@ impl App {
             c.text(l.hint.cx(), l.hint.cy() + 4.0 * s, 12.0 * s, t.text_faint, hint, Align::Center);
         }
         self.draw_toast(c);
-        self.draw_tooltip(c);
+        if self.about {
+            self.draw_about(c);
+        } else {
+            self.draw_tooltip(c);
+        }
         if self.drop_hover {
             c.rrect(l.preview.inset(6.0 * s, 6.0 * s), 12.0 * s, t.accent_soft);
             c.rrect_stroke(l.preview.inset(6.0 * s, 6.0 * s), 12.0 * s, 2.0 * s, t.accent);
@@ -1115,6 +1151,8 @@ impl App {
         }
         let ow = c.text.measure("Open", 13.0 * s) + 18.0 * s + 6.0 * s + 28.0 * s;
         let or = Rect::new(left - 8.0 * s - ow, by, ow, bh);
+        let ir = Rect::new(or.x - 4.0 * s - bh, by, bh, bh);
+        self.button(c, ir, Act::About, "About MP4 Splitter (F1)", Some(Icon::Info), None, Style::Ghost);
         self.button(c, or, Act::Open, "Open a video (Ctrl+O), or drop one on the window", Some(Icon::Folder), Some("Open"), Style::Secondary);
         // What the file is; its name and the app's are in the window's title bar.
         if let Some(d) = &self.doc {
@@ -1132,7 +1170,7 @@ impl App {
                 meta.push("no sound".into());
             }
             meta.push(split::timecode(d.info.duration));
-            let meta = ellipsize(c.text, &meta.join("  ·  "), 12.0 * s, or.x - x - 16.0 * s);
+            let meta = ellipsize(c.text, &meta.join("  ·  "), 12.0 * s, ir.x - x - 16.0 * s);
             c.text(x, cy + 4.5 * s, 12.0 * s, t.text_muted, &meta, Align::Left);
         }
     }
@@ -1629,6 +1667,63 @@ impl App {
         self.hits.push((cr, Act::CloseToast, "", OVER));
     }
 
+    /// How wide the About page is: its one-line description, with margins.
+    fn about_width(&self) -> f32 {
+        let s = self.l.s;
+        crate::fonts::ui_font().width(ABOUT_LINE, 13.0 * s) + 64.0 * s
+    }
+
+    /// Where the About page is.
+    fn about_rect(&self, w: f32) -> Rect {
+        let h = 296.0 * self.l.s;
+        Rect::new((self.l.w - w) / 2.0, (self.l.h - h) / 2.0, w, h)
+    }
+
+    fn draw_about(&mut self, c: &mut Canvas) {
+        let t = self.theme;
+        let s = self.l.s;
+        let (bx0, by0, bx1, by1) = c.fb.bounds();
+        c.rect(Rect::new(bx0 as f32, by0 as f32, (bx1 - bx0) as f32, (by1 - by0) as f32), crate::paint::hex(0, 120));
+        let r = self.about_rect(self.about_width());
+        c.shadow(r, 16.0 * s);
+        c.rrect(r, 16.0 * s, t.surface);
+        c.rrect_stroke(r, 16.0 * s, 1.0 * s, t.border);
+        let cx = r.cx();
+        // The mark, the name, the version, what it is.
+        let m = 72.0 * s;
+        let mr = Rect::new(cx - m / 2.0, r.y + 28.0 * s, m, m);
+        c.rrect(mr, 18.0 * s, t.accent);
+        c.icon(Icon::Scissors, mr.inset(14.0 * s, 14.0 * s), t.on_accent);
+        c.text(cx, mr.bottom() + 36.0 * s, 22.0 * s, t.text, "MP4 Splitter", Align::Center);
+        c.text(cx, mr.bottom() + 58.0 * s, 13.0 * s, t.text_muted, concat!("Version ", env!("CARGO_PKG_VERSION")), Align::Center);
+        c.text(cx, mr.bottom() + 88.0 * s, 13.0 * s, t.text, ABOUT_LINE, Align::Center);
+        let sep = mr.bottom() + 106.0 * s;
+        c.rect(Rect::new(r.x + 24.0 * s, sep, r.w - 48.0 * s, 1.0 * s), t.separator);
+        // More from PowerNapps.
+        let label = "More from PowerNapps";
+        let link = "powernapps.net";
+        let (lw, kw) = (c.text.measure(label, 13.0 * s), c.text.measure(link, 13.0 * s));
+        let x0 = cx - (lw + 8.0 * s + kw) / 2.0;
+        let y = sep + 28.0 * s;
+        c.text(x0, y, 13.0 * s, t.text_muted, label, Align::Left);
+        let lx = x0 + lw + 8.0 * s;
+        c.text(lx, y, 13.0 * s, t.accent, link, Align::Left);
+        let hit = Rect::new(lx - 4.0 * s, y - 15.0 * s, kw + 8.0 * s, 22.0 * s);
+        if hit.contains(self.mouse.0, self.mouse.1) {
+            c.rect(Rect::new(lx, y + 3.0 * s, kw, 1.0 * s), t.accent);
+        }
+        self.hits.push((hit, Act::AboutLink, "", OVER));
+        // The footer. The font has no copyright sign: a ring with a small c.
+        let foot = "2026 PowerNapps  ·  Made in Los Angeles by Denis Platonov  ·  Apache-2.0 License";
+        let px = 11.5 * s;
+        let rad = 5.0 * s;
+        let fw = c.text.measure(foot, px) + 2.0 * rad + 5.0 * s;
+        let (fx, fy) = (cx - fw / 2.0, sep + 58.0 * s);
+        c.ring(fx + rad, fy - 4.0 * s, rad, 0.9 * s, t.text_faint);
+        c.text(fx + rad, fy - 1.0 * s, 8.5 * s, t.text_faint, "c", Align::Center);
+        c.text(fx + 2.0 * rad + 5.0 * s, fy, px, t.text_faint, foot, Align::Left);
+    }
+
     fn draw_tooltip(&mut self, c: &mut Canvas) {
         let t = self.theme;
         let s = self.l.s;
@@ -1847,6 +1942,9 @@ impl App {
 
     /// The wheel turned: lines, up and right positive.
     pub fn on_wheel(&mut self, dx: f64, dy: f64) {
+        if self.about {
+            return;
+        }
         let (mx, my) = self.mouse;
         if self.l.card.contains(mx, my) {
             if self.mods.shift || dx.abs() > dy.abs() {
