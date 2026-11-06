@@ -1,9 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.1.2
 
 - **Updates:** once a day the app asks GitHub whether there is a newer release, and offers it with its notes. The Windows exe downloads it, checks it against the release's `SHA256SUMS.txt`, swaps itself and restarts when you say so; a new version that won't start is swapped back. macOS and Linux open the download page. Turn the daily check off in Settings; **Check for updates** is in Settings and About. The request says only which app and version is asking.
 - **Microsoft Store package:** each release can build a package for the Store, which then handles its updates. Not submitted yet.
+- **Privacy policy:** [PRIVACY.md](PRIVACY.md) says what goes over the network: only the update check.
+- **If you have 0.1.1 or older:** those versions have no updater, so download this one by hand. From here on, updates come to you.
 
 ## 0.1.1
 
