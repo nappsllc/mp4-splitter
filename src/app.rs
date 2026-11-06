@@ -2079,7 +2079,7 @@ impl App {
         match self.updates.machine.as_ref().map(|m| &m.screen) {
             Some(Screen::Available(_)) => 360.0,
             Some(Screen::Failed { .. } | Screen::CheckFailed(_)) => 220.0,
-            _ => 190.0,
+            _ => 180.0,
         }
     }
 
@@ -2092,10 +2092,7 @@ impl App {
         let current = env!("CARGO_PKG_VERSION");
         let (title, y0) = (r.y + 46.0 * s, r.y + 76.0 * s);
         let width = r.w - 56.0 * s;
-        let line = |c: &mut Canvas, text: &str, y: f32, col| {
-            let text = ellipsize(c.text, text, 13.0 * s, width);
-            c.text(cx, y, 13.0 * s, col, &text, Align::Center);
-        };
+        let body = Rect::new(r.x + 28.0 * s, y0 - 14.0 * s, width, 60.0 * s);
         let head = |c: &mut Canvas, text: &str| {
             let text = ellipsize(c.text, text, 17.0 * s, width);
             c.text(cx, title, 17.0 * s, t.text, &text, Align::Center);
@@ -2108,15 +2105,15 @@ impl App {
             }
             Screen::UpToDate => {
                 head(c, tr!("update.up_to_date"));
-                line(c, &tr!("update.latest", current = current), y0, t.text_muted);
+                self.update_text(c, body, &tr!("update.latest", current = current));
             }
             Screen::Managed(store) => {
                 head(c, &format!("{} {current}", crate::APP_NAME));
-                line(c, &tr!("update.managed", store = *store), y0, t.text_muted);
+                self.update_text(c, body, &tr!("update.managed", store = *store));
             }
             Screen::CheckFailed(e) => {
                 head(c, tr!("update.check_failed"));
-                self.update_error(c, Rect::new(r.x + 28.0 * s, y0 - 14.0 * s, width, 60.0 * s), e);
+                self.update_text(c, body, e);
             }
             Screen::Downloading { got, total, .. } => {
                 let done = format!("{:.1} MB", *got as f64 / 1_048_576.0);
@@ -2139,12 +2136,12 @@ impl App {
                 } else {
                     tr!("update.ready_note")
                 };
-                line(c, note, y0, t.text_muted);
+                self.update_text(c, body, note);
             }
             Screen::Restarting(_) => head(c, tr!("update.restarting")),
             Screen::Failed { rel, msg } => {
                 head(c, &tr!("update.install_failed_title", version = rel.version.as_str()));
-                self.update_error(c, Rect::new(r.x + 28.0 * s, y0 - 14.0 * s, width, 60.0 * s), msg);
+                self.update_text(c, body, msg);
             }
         }
         // The buttons, side by side in the middle, the first the main one.
@@ -2164,7 +2161,7 @@ impl App {
     fn update_notes(&self, c: &mut Canvas, r: Rect, notes: &str) {
         let t = self.theme;
         let s = self.l.s;
-        c.rrect(r, 8.0 * s, t.separator.with_alpha(60));
+        c.rrect_stroke(r, 8.0 * s, 1.0 * s, t.border);
         let (px, row) = (12.5 * s, 18.0 * s);
         let inner = r.inset(12.0 * s, 10.0 * s);
         let parsed = update::notes_lines(notes, 40);
@@ -2184,8 +2181,8 @@ impl App {
         }
     }
 
-    /// Why it failed, wrapped and centred.
-    fn update_error(&self, c: &mut Canvas, r: Rect, e: &str) {
+    /// A message, wrapped and centred.
+    fn update_text(&self, c: &mut Canvas, r: Rect, e: &str) {
         let s = self.l.s;
         let px = 12.5 * s;
         let text = &*c.text;
@@ -2618,6 +2615,32 @@ mod tests {
 
     /// Windows asks for a paint whenever the window is uncovered, with nothing
     /// new to draw: what can be clicked must stay.
+    /// The new controls' widths, in every language.
+    #[test]
+    fn the_update_controls_fit_in_every_language() {
+        let text = Text::new();
+        let w = |t: &str, px: f32| text.measure(t, px);
+        for (tag, get) in crate::i18n::all_strings() {
+            let g = |k: &str| get(k);
+            let row = w(&g("settings.check_auto"), 13.0) + w(&g("update.check"), 13.0) + 54.0;
+            assert!(row <= 680.0 - 120.0 - 24.0, "{tag}: Settings' row is {row}");
+            let about = w(&g("about.version").replace("{version}", "10.10.10"), 13.0) + 14.0 + w(&g("update.check"), 13.0) + 8.0;
+            assert!(about <= w(&g("about.line"), 13.0) + 64.0 - 16.0, "{tag}: About's line is {about}");
+            let buttons: f32 = ["update.btn.page", "update.btn.skip", "update.btn.cancel"].iter().map(|k| w(&g(k), 13.0) + 32.0).sum::<f32>() + 16.0;
+            assert!(buttons <= UPDATE_W - 40.0, "{tag}: the prompt's buttons are {buttons}");
+            for (k, px) in [
+                ("update.available", 17.0),
+                ("update.ready", 17.0),
+                ("update.install_failed_title", 17.0),
+                ("update.up_to_date", 17.0),
+                ("update.check_failed", 17.0),
+            ] {
+                let t = g(k).replace("{version}", "10.10.10").replace("{current}", "10.10.9");
+                assert!(w(&t, px) <= UPDATE_W - 56.0, "{tag}: {k} is {}", w(&t, px));
+            }
+        }
+    }
+
     /// The daily check's news: not over playing, dragging or another page; then once.
     #[test]
     fn the_daily_check_waits_for_a_quiet_moment() {
