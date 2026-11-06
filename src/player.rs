@@ -17,9 +17,9 @@ use std::time::{Duration, Instant};
 pub use crate::ffmpeg::PEAKS_PER_SEC;
 
 /// What to say when pictures and sound can't be decoded here.
-pub const NO_DECODER_TOAST: &str = "ffmpeg was not found: no pictures or sound, but splitting works. Install ffmpeg to see the video.";
-pub const NO_DECODER_HINT: &str = "ffmpeg was not found: install it to see pictures and hear sound";
-pub const NO_DECODER_PREVIEW: &str = "No preview: ffmpeg was not found";
+pub fn no_decoder() -> (&'static str, &'static str, &'static str) {
+    (tr!("msg.no_ffmpeg"), tr!("msg.no_ffmpeg_hint"), tr!("msg.no_ffmpeg_preview"))
+}
 
 /// Can pictures and sound be decoded here?
 pub fn available() -> bool {

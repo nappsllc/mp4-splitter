@@ -1,0 +1,102 @@
+# MP4 Splitter UI strings: English, the source language and the template for
+# translations (lang/<tag>.txt, same keys). Format: `key = value`, one per line;
+# {name} placeholders must stay as they are; plural strings have one line per
+# CLDR form the language uses: key[zero|one|two|few|many|other]. Metadata:
+# @name (the language in itself), @dir (ltr or rtl), @plural (the rule: see
+# src/plural.rs). Keys in parentheses, such as (Ctrl+E) or (F1), stay as written.
+@name = English
+@dir = ltr
+@plural = one_other
+
+# The header
+header.open = Open
+header.export = Export
+header.exporting = Exporting {done}/{total}…
+header.export_pieces[one] = Export {n} piece
+header.export_pieces[other] = Export {n} pieces
+header.one_file = One file
+header.separate_files = Separate files
+header.no_sound = no sound
+tip.export = Write the pieces next to the video, without re-encoding (Ctrl+E; Shift: choose a folder)
+tip.one_file = Join the kept pieces, in order, into one file, without re-encoding
+tip.separate_files = Write each kept piece to its own file
+tip.open = Open a video (Ctrl+O), or drop one on the window
+tip.about = About MP4 Splitter (F1)
+tip.settings = Settings (Ctrl+,)
+
+# The picture
+preview.drop = Drop an MP4 here, or click to open one
+preview.lossless = Lossless: pieces are copied, never re-encoded
+preview.no_video = No video track (sound only)
+preview.loading = Loading…
+preview.cut_away = Cut away
+controls.frame = frame {n}
+controls.key = key
+tip.to_start = Go to the start of the kept part (again: the very start)
+tip.frame_back = Previous frame (←; Shift: 1 s)
+tip.play = Play / pause (Space)
+tip.frame_fwd = Next frame (→; Shift: 1 s)
+tip.to_end = Go to the end of the kept part (again: the very end)
+tip.mute = Mute (M)
+tip.snap = Snap to key frames (N): pieces then start exactly on a key frame, for players that ignore edit lists
+tip.mark_out = Set the end at the playhead (O)
+tip.cut = Cut at the playhead (S); double-click the timeline to cut there
+tip.mark_in = Set the start at the playhead (I)
+
+# Splitting
+tools.split_into = Split into
+tools.split_in = Split in {n}
+tools.kept = Kept
+tools.pieces[one] = {n} piece
+tools.pieces[other] = {n} pieces
+tip.preset[one] = {n} equal piece ({n})
+tip.preset[other] = {n} equal pieces ({n})
+tip.fewer = Fewer pieces
+tip.more = More pieces
+tip.split_in = Split the kept part into this many equal pieces
+tip.clear_cuts = Remove all cuts (0)
+
+# The timeline
+timeline.empty = The timeline shows here once a video is open
+timeline.reading = Reading the sound…
+timeline.no_sound = No sound
+tip.drop_piece = Leave this piece out (Delete at the playhead)
+tip.keep_piece = Put this piece back
+hint.long = Space play · ← → frame · Shift 1 s · ↑ ↓ cuts · I / O start / end · S cut · Del remove · 2–9 split · wheel zoom
+hint.short = Space play · ← → frame · I / O start / end · S cut · 2–9 split
+
+# Messages
+msg.cant_open = Can't open {name}: {error}
+msg.nothing_to_play = {name} has nothing to play
+msg.saved_one = Saved {name} to {dir}
+msg.saved[one] = Saved {n} piece to {dir}
+msg.saved[other] = Saved {n} pieces to {dir}
+msg.export_failed = Export failed: {error}
+msg.cut_room = A cut needs at least 0.1 s on each side, inside the kept part
+msg.only_fit[one] = Only {n} piece fits between the key frames
+msg.only_fit[other] = Only {n} pieces fit between the key frames
+msg.one_stays = At least one piece has to stay
+msg.remove_where = Put the playhead on a cut or inside a piece to remove it
+msg.show_folder = Show folder
+msg.no_decoder = Media Foundation is not installed: no pictures or sound, but splitting works. Add the Media Feature Pack to see the video.
+msg.no_decoder_hint = Media Foundation is not installed: add the Media Feature Pack to see pictures and hear sound
+msg.no_decoder_preview = No preview: Media Foundation is not installed
+msg.no_ffmpeg = ffmpeg was not found: no pictures or sound, but splitting works. Install ffmpeg to see the video.
+msg.no_ffmpeg_hint = ffmpeg was not found: install it to see pictures and hear sound
+msg.no_ffmpeg_preview = No preview: ffmpeg was not found
+
+# Settings
+settings.title = Settings
+settings.theme = Theme
+settings.theme.system = System
+settings.theme.dark = Dark
+settings.theme.light = Light
+settings.accent = Accent
+settings.language = Language
+settings.language.system = System language
+
+# About
+about.version = Version {version}
+about.line = Cut videos into pieces without re-encoding. Tiny, draws its own pixels, runs on Windows, macOS and Linux.
+about.more = More from PowerNapps
+about.footer = 2026 PowerNapps  ·  Made in Los Angeles by Denis Platonov  ·  Apache-2.0 License

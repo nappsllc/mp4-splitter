@@ -1,0 +1,84 @@
+@name = 日本語
+@dir = ltr
+@plural = none
+
+header.open = 開く
+header.export = 書き出し
+header.exporting = 書き出し中 {done}/{total}…
+header.export_pieces[other] = {n} 個のパートを書き出し
+header.one_file = 1 ファイル
+header.separate_files = 個別に
+header.no_sound = 音声なし
+tip.export = 動画と同じ場所にパートを書き出します。再エンコードなし (Ctrl+E、Shift: フォルダーを選択)
+tip.one_file = 残したパートを順番に 1 つのファイルに結合します。再エンコードなし
+tip.separate_files = 残したパートをそれぞれ別のファイルに書き出します
+tip.open = 動画を開く (Ctrl+O)。ウィンドウにドロップしても開けます
+tip.about = MP4 Splitter について (F1)
+tip.settings = 設定 (Ctrl+,)
+
+preview.drop = ここに MP4 をドロップ、またはクリックして開く
+preview.lossless = ロスレス: パートはコピーされ、再エンコードされません
+preview.no_video = 映像トラックなし (音声のみ)
+preview.loading = 読み込み中…
+preview.cut_away = 除外
+controls.frame = フレーム {n}
+controls.key = キー
+tip.to_start = 残す範囲の先頭へ (もう一度: 動画の先頭へ)
+tip.frame_back = 前のフレーム (←、Shift: 1 s)
+tip.play = 再生 / 一時停止 (Space)
+tip.frame_fwd = 次のフレーム (→、Shift: 1 s)
+tip.to_end = 残す範囲の末尾へ (もう一度: 動画の末尾へ)
+tip.mute = ミュート (M)
+tip.snap = キーフレームにスナップ (N): パートは必ずキーフレームから始まります。編集リストを無視するプレーヤー向け
+tip.mark_out = 再生ヘッドの位置を終了点に設定 (O)
+tip.cut = 再生ヘッドの位置で分割 (S)。タイムラインをダブルクリックしてもその位置で分割
+tip.mark_in = 再生ヘッドの位置を開始点に設定 (I)
+
+tools.split_into = 分割数
+tools.split_in = {n} 分割
+tools.kept = 残す
+tools.pieces[other] = {n} パート
+tip.preset[other] = {n} 等分 ({n})
+tip.fewer = パートを減らす
+tip.more = パートを増やす
+tip.split_in = 残す範囲をこの数に等分割します
+tip.clear_cuts = すべての分割点を削除 (0)
+
+timeline.empty = 動画を開くとここにタイムラインが表示されます
+timeline.reading = 音声を読み取り中…
+timeline.no_sound = 音声なし
+tip.drop_piece = このパートを除外 (再生ヘッドの位置で Delete)
+tip.keep_piece = このパートを戻す
+hint.long = Space 再生 · ← → フレーム · Shift 1 s · ↑ ↓ 分割点 · I / O 開始 / 終了 · S 分割 · Del 削除 · 2–9 等分 · ホイール ズーム
+hint.short = Space 再生 · ← → フレーム · I / O 開始 / 終了 · S 分割 · 2–9 等分
+
+msg.cant_open = {name} を開けません: {error}
+msg.nothing_to_play = {name} には再生できるものがありません
+msg.saved_one = {name} を {dir} に保存しました
+msg.saved[other] = {n} 個のパートを {dir} に保存しました
+msg.export_failed = 書き出しに失敗しました: {error}
+msg.cut_room = 分割点は、残す範囲の中で両側に 0.1 s 以上必要です
+msg.only_fit[other] = キーフレームの間には {n} 個のパートしか入りません
+msg.one_stays = 少なくとも 1 つのパートを残す必要があります
+msg.remove_where = 削除するには、再生ヘッドを分割点またはパートの上に置いてください
+msg.show_folder = フォルダーを表示
+msg.no_decoder = Media Foundation がインストールされていません: 映像と音声は使えませんが、分割はできます。映像を見るには Media Feature Pack を追加してください。
+msg.no_decoder_hint = Media Foundation がインストールされていません: 映像と音声には Media Feature Pack を追加してください
+msg.no_decoder_preview = プレビューなし: Media Foundation がインストールされていません
+msg.no_ffmpeg = ffmpeg が見つかりません: 映像と音声は使えませんが、分割はできます。映像を見るには ffmpeg をインストールしてください。
+msg.no_ffmpeg_hint = ffmpeg が見つかりません: 映像と音声にはインストールしてください
+msg.no_ffmpeg_preview = プレビューなし: ffmpeg が見つかりません
+
+settings.title = 設定
+settings.theme = テーマ
+settings.theme.system = システム
+settings.theme.dark = ダーク
+settings.theme.light = ライト
+settings.accent = アクセント
+settings.language = 言語
+settings.language.system = システムの言語
+
+about.version = バージョン {version}
+about.line = 再エンコードなしで動画をパートに分割します。小さく、自前で描画し、Windows、macOS、Linux で動作します。
+about.more = PowerNapps の他のアプリ
+about.footer = 2026 PowerNapps  ·  Denis Platonov がロサンゼルスで制作  ·  Apache-2.0 ライセンス

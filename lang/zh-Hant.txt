@@ -1,0 +1,84 @@
+@name = 繁體中文
+@dir = ltr
+@plural = none
+
+header.open = 開啟
+header.export = 匯出
+header.exporting = 正在匯出 {done}/{total}…
+header.export_pieces[other] = 匯出 {n} 個片段
+header.one_file = 合併檔案
+header.separate_files = 分開檔案
+header.no_sound = 無聲音
+tip.export = 在影片旁邊寫出各片段，不重新編碼 (Ctrl+E，Shift：選擇資料夾)
+tip.one_file = 依順序把保留的片段合併成一個檔案，不重新編碼
+tip.separate_files = 把每個保留的片段寫入各自的檔案
+tip.open = 開啟影片 (Ctrl+O)，或把影片拖曳到視窗上
+tip.about = 關於 MP4 Splitter (F1)
+tip.settings = 設定 (Ctrl+,)
+
+preview.drop = 把 MP4 拖曳到這裡，或按一下開啟
+preview.lossless = 無損：片段只是複製，不會重新編碼
+preview.no_video = 沒有視訊軌（只有聲音）
+preview.loading = 正在載入…
+preview.cut_away = 已排除
+controls.frame = 第 {n} 影格
+controls.key = 關鍵
+tip.to_start = 跳到保留部分的開頭 (再按一次：跳到最開頭)
+tip.frame_back = 上一個影格 (←，Shift：1 s)
+tip.play = 播放 / 暫停 (Space)
+tip.frame_fwd = 下一個影格 (→，Shift：1 s)
+tip.to_end = 跳到保留部分的結尾 (再按一次：跳到最末端)
+tip.mute = 靜音 (M)
+tip.snap = 貼齊關鍵影格 (N)：片段會剛好從關鍵影格開始，適用於忽略編輯清單的播放器
+tip.mark_out = 把結束點設在播放位置 (O)
+tip.cut = 在播放位置切分 (S)；在時間軸上按兩下可在該處切分
+tip.mark_in = 把起點設在播放位置 (I)
+
+tools.split_into = 分成
+tools.split_in = 分成 {n} 份
+tools.kept = 保留
+tools.pieces[other] = {n} 個片段
+tip.preset[other] = {n} 個等長片段 ({n})
+tip.fewer = 減少片段
+tip.more = 增加片段
+tip.split_in = 把保留部分平分成這麼多個等長片段
+tip.clear_cuts = 清除所有切點 (0)
+
+timeline.empty = 開啟影片後，時間軸會顯示在這裡
+timeline.reading = 正在讀取聲音…
+timeline.no_sound = 無聲音
+tip.drop_piece = 排除此片段 (在播放位置按 Delete)
+tip.keep_piece = 還原此片段
+hint.long = Space 播放 · ← → 影格 · Shift 1 s · ↑ ↓ 切點 · I / O 起點 / 終點 · S 切分 · Del 移除 · 2–9 平分 · 滾輪 縮放
+hint.short = Space 播放 · ← → 影格 · I / O 起點 / 終點 · S 切分 · 2–9 平分
+
+msg.cant_open = 無法開啟 {name}：{error}
+msg.nothing_to_play = {name} 沒有可播放的內容
+msg.saved_one = 已將 {name} 儲存到 {dir}
+msg.saved[other] = 已將 {n} 個片段儲存到 {dir}
+msg.export_failed = 匯出失敗：{error}
+msg.cut_room = 切點兩側在保留部分內都至少需要 0.1 s
+msg.only_fit[other] = 關鍵影格之間只放得下 {n} 個片段
+msg.one_stays = 至少要保留一個片段
+msg.remove_where = 把播放位置放在切點上或片段內即可移除
+msg.show_folder = 顯示資料夾
+msg.no_decoder = 未安裝 Media Foundation：沒有畫面和聲音，但仍可分割。安裝 Media Feature Pack 即可觀看影片。
+msg.no_decoder_hint = 未安裝 Media Foundation：安裝 Media Feature Pack 才能看到畫面、聽到聲音
+msg.no_decoder_preview = 沒有預覽：未安裝 Media Foundation
+msg.no_ffmpeg = 找不到 ffmpeg：沒有畫面和聲音，但仍可分割。安裝 ffmpeg 即可觀看影片。
+msg.no_ffmpeg_hint = 找不到 ffmpeg：安裝後才能看到畫面、聽到聲音
+msg.no_ffmpeg_preview = 沒有預覽：找不到 ffmpeg
+
+settings.title = 設定
+settings.theme = 佈景主題
+settings.theme.system = 系統
+settings.theme.dark = 深色
+settings.theme.light = 淺色
+settings.accent = 強調色
+settings.language = 語言
+settings.language.system = 系統語言
+
+about.version = 版本 {version}
+about.line = 無需重新編碼，把影片切成片段。小巧，自行繪製介面，可在 Windows、macOS 和 Linux 上執行。
+about.more = PowerNapps 的更多作品
+about.footer = 2026 PowerNapps  ·  由 Denis Platonov 於洛杉磯製作  ·  Apache-2.0 授權

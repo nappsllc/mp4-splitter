@@ -35,9 +35,6 @@ const ALL: u8 = HEADER | PREVIEW | CONTROLS | TIMELINE;
 /// Hits of what floats over the bands (the toast): redone with any paint.
 const OVER: u8 = 16;
 
-/// What the About page says the app is.
-const ABOUT_LINE: &str = "Cut videos into pieces without re-encoding. Tiny, draws its own pixels, runs on Windows, macOS and Linux.";
-
 /// The corners of the preview and the picture in it, in logical pixels.
 const PREVIEW_RADIUS: f32 = 12.0;
 
@@ -78,6 +75,8 @@ enum Act {
     Settings,
     Theme(ThemeChoice),
     Accent(usize),
+    /// The language picker's item: 0 the system's, then each language.
+    Language(usize),
 }
 
 /// A page over the window.
@@ -182,6 +181,9 @@ pub struct App {
     dirty: Cell<u8>,
     /// The band being drawn: what its controls' hits belong to.
     part: u8,
+    /// What is being drawn is flipped afterwards (right to left): its controls
+    /// are on screen at their mirror images.
+    mirrored: bool,
     text: Option<Text>,
     theme: Theme,
     l: Layout,
@@ -219,6 +221,7 @@ impl App {
     pub fn new(host: Box<dyn Host>, dark: Option<bool>, open: Option<PathBuf>) -> App {
         let autoclose = std::env::var("MP4_SPLITTER_AUTOCLOSE_MS").ok().and_then(|v| v.parse().ok()).map(|ms| Instant::now() + Duration::from_millis(ms));
         let config = Config::load();
+        crate::i18n::set_language(&config.language);
         let theme = theme::pick(dark, config.theme, config.accent);
         host.set_colors(&theme);
         let (w, h) = host.size();
@@ -233,6 +236,7 @@ impl App {
             canvas: Vec::new(),
             dirty: Cell::new(ALL),
             part: HEADER,
+            mirrored: false,
             text: Some(Text::new()),
             theme,
             l,
@@ -325,12 +329,12 @@ impl App {
         let info = match std::fs::File::open(path).map_err(anyhow::Error::from).and_then(|f| mp4::info(&mut std::io::BufReader::new(f))) {
             Ok(i) => i,
             Err(e) => {
-                self.say(format!("Can't open {}: {e:#}", file_name(path)), true, None);
+                self.say(tr!("msg.cant_open", name = file_name(path), error = format!("{e:#}")), true, None);
                 return;
             }
         };
         if info.duration.is_zero() {
-            self.say(format!("{} has nothing to play", file_name(path)), true, None);
+            self.say(tr!("msg.nothing_to_play", name = file_name(path)), true, None);
             return;
         }
         let src = Source::new(path.to_path_buf(), &info);
@@ -356,7 +360,7 @@ impl App {
         self.toast = None;
         self.host.set_title(&format!("{} — MP4 Splitter", file_name(path)));
         if !self.decoder {
-            self.say(player::NO_DECODER_TOAST, true, None);
+            self.say(player::no_decoder().0, true, None);
         }
         self.request_still();
         self.redraw();
@@ -401,12 +405,16 @@ impl App {
                 let n = files.len();
                 let first = files.first().cloned();
                 let dir = first.as_ref().and_then(|f| f.parent()).map(|d| d.display().to_string()).unwrap_or_default();
-                let what = if n == 1 { format!("Saved {}", first.as_deref().map(file_name).unwrap_or_default()) } else { format!("Saved {n} pieces") };
-                self.say(format!("{what} to {dir}"), false, first);
+                let text = if n == 1 {
+                    tr!("msg.saved_one", name = first.as_deref().map(file_name).unwrap_or_default(), dir = dir)
+                } else {
+                    trn!("msg.saved", n, dir = dir)
+                };
+                self.say(text, false, first);
             }
             Some(Err(e)) => {
                 self.exporting = None;
-                self.say(format!("Export failed: {e}"), true, None);
+                self.say(tr!("msg.export_failed", error = e), true, None);
             }
         }
     }
@@ -670,7 +678,7 @@ impl App {
                     Act::MarkOut => d.plan.mark_out(t),
                     _ => {
                         if d.plan.add_cut(t).is_none() {
-                            self.say("A cut needs at least 0.1 s on each side, inside the kept part", true, None);
+                            self.say(tr!("msg.cut_room"), true, None);
                         }
                     }
                 }
@@ -688,7 +696,7 @@ impl App {
                     d.plan.split_equal(n, |t| if snap { split::nearest(&keys, t).unwrap_or(t) } else { t });
                     let got = d.plan.pieces().len();
                     if got < n {
-                        self.say(format!("Only {got} pieces fit between the key frames"), true, None);
+                        self.say(trn!("msg.only_fit", got), true, None);
                     }
                 }
             }
@@ -718,6 +726,11 @@ impl App {
                 self.config.accent = i;
                 self.settings_changed();
             }
+            Act::Language(i) => {
+                self.config.language = if i == 0 { String::new() } else { crate::i18n::languages().nth(i - 1).map_or(String::new(), |l| l.tag.to_string()) };
+                crate::i18n::set_language(&self.config.language);
+                self.settings_changed();
+            }
             Act::AboutLink => crate::links::open(crate::links::POWERNAPPS),
         }
         self.redraw();
@@ -735,7 +748,7 @@ impl App {
         let Some(d) = &mut self.doc else { return };
         let keep = !d.plan.on.get(i).copied().unwrap_or(true);
         if !d.plan.set_kept(i, keep) {
-            self.say("At least one piece has to stay", true, None);
+            self.say(tr!("msg.one_stays"), true, None);
         }
     }
 
@@ -749,7 +762,7 @@ impl App {
         match (i, piece, &mut self.doc) {
             (Some(i), _, Some(d)) => d.plan.remove_cut(i),
             (None, Some(p), Some(_)) => self.toggle_piece(p),
-            _ => self.say("Put the playhead on a cut or inside a piece to remove it", false, None),
+            _ => self.say(tr!("msg.remove_where"), false, None),
         }
         self.redraw();
     }
@@ -965,7 +978,10 @@ impl App {
         }
         let mut text = self.text.take().unwrap_or_else(Text::new);
         let dirty = self.dirty.replace(0);
-        self.hits.retain(|hit| hit.3 & dirty == 0 && hit.3 != OVER);
+        // A paint with nothing to draw (the window was uncovered) keeps them all.
+        if dirty != 0 {
+            self.hits.retain(|hit| hit.3 & dirty == 0 && hit.3 != OVER);
+        }
         // Everything at once, or band by band (each on its own rows: what
         // floats over them is cut to what is drawn).
         let whole = [(ALL, 0, h)];
@@ -1061,11 +1077,31 @@ impl App {
             }
             (None, None) => {}
         }
-        self.hits.push((r, act, tip, self.part));
+        self.hits.push((self.on_screen(r), act, tip, self.part));
+    }
+
+    /// Where a rectangle being drawn ends up.
+    fn on_screen(&self, r: Rect) -> Rect {
+        if self.mirrored { Rect::new(self.l.w - r.right(), r.y, r.w, r.h) } else { r }
+    }
+
+    /// Draw with `f`, flipped afterwards in `rows` if the language reads right
+    /// to left. The media stays as it is in every language; the controls that
+    /// are about the file, and the pages, read its way.
+    fn draw_flipped(&mut self, c: &mut Canvas, rows: (f32, f32), f: impl FnOnce(&mut App, &mut Canvas)) {
+        let rtl = crate::i18n::is_rtl();
+        self.mirrored = rtl;
+        c.fb.mirror = rtl;
+        f(self, c);
+        self.mirrored = false;
+        c.fb.mirror = false;
+        if rtl {
+            c.fb.flip_rect(0, rows.0.round() as i32, self.l.w as i32, rows.1.round() as i32);
+        }
     }
 
     fn hit_hover(&self, r: Rect) -> bool {
-        r.contains(self.mouse.0, self.mouse.1) && self.drag.is_none() && (self.page.is_none() || self.part == OVER)
+        self.on_screen(r).contains(self.mouse.0, self.mouse.1) && self.drag.is_none() && (self.page.is_none() || self.part == OVER)
     }
 
     fn draw(&mut self, c: &mut Canvas, part: u8) {
@@ -1075,7 +1111,7 @@ impl App {
         c.clear(t.bg);
         if part & HEADER != 0 {
             self.part = HEADER;
-            self.draw_header(c);
+            self.draw_flipped(c, (l.header.y, l.header.bottom()), App::draw_header);
         }
         if part & PREVIEW != 0 {
             self.part = PREVIEW;
@@ -1096,7 +1132,7 @@ impl App {
             }
             if part & TIMELINE != 0 {
                 self.part = TIMELINE;
-                self.draw_tools(c);
+                self.draw_flipped(c, (l.tools.y, l.card.y), App::draw_tools);
             }
         }
         if part & TIMELINE != 0 {
@@ -1105,9 +1141,8 @@ impl App {
             c.rrect(l.card, 12.0 * s, t.surface);
             c.rrect_stroke(l.card, 12.0 * s, 1.0 * s, t.border);
             self.draw_timeline(c);
-            let hint = "Space play · ← → frame · Shift 1 s · ↑ ↓ cuts · I / O start / end · S cut · Del remove · 2–9 split · wheel zoom";
-            let hint =
-                if c.text.measure(hint, 12.0 * s) > l.hint.w { "Space play · ← → frame · I / O start / end · S cut · 2–9 split" } else { hint };
+            let hint = tr!("hint.long");
+            let hint = if c.text.measure(hint, 12.0 * s) > l.hint.w { tr!("hint.short") } else { hint };
             c.text(l.hint.cx(), l.hint.cy() + 4.0 * s, 12.0 * s, t.text_faint, hint, Align::Center);
         }
         self.draw_toast(c);
@@ -1137,28 +1172,20 @@ impl App {
         let (label, busy) = match &self.exporting {
             Some(p) => {
                 let p = p.lock().unwrap_or_else(|e| e.into_inner());
-                (format!("Exporting {}/{}…", (p.done + 1).min(p.total), p.total), true)
+                (tr!("header.exporting", done = (p.done + 1).min(p.total), total = p.total), true)
             }
             None => match &self.doc {
                 Some(d) => {
                     let n = d.plan.kept_pieces().len();
-                    (if n == 1 || self.join { "Export".to_string() } else { format!("Export {n} pieces") }, false)
+                    (if n == 1 || self.join { tr!("header.export").to_string() } else { trn!("header.export_pieces", n) }, false)
                 }
-                None => ("Export".to_string(), false),
+                None => (tr!("header.export").to_string(), false),
             },
         };
         let ew = c.text.measure(&label, 13.0 * s) + 18.0 * s + 6.0 * s + 32.0 * s;
         let er = Rect::new(l.w - 16.0 * s - ew, by, ew, bh);
         if self.doc.is_some() && !busy {
-            self.button(
-                c,
-                er,
-                Act::Export,
-                "Write the pieces next to the video, without re-encoding (Ctrl+E; Shift: choose a folder)",
-                Some(Icon::Export),
-                Some(&label),
-                Style::Primary,
-            );
+            self.button(c, er, Act::Export, tr!("tip.export"), Some(Icon::Export), Some(&label), Style::Primary);
         } else {
             c.rrect(er, 8.0 * s, if busy { t.accent_soft } else { t.hover });
             c.icon(Icon::Export, Rect::new(er.x + 16.0 * s, er.cy() - 9.0 * s, 18.0 * s, 18.0 * s), t.text_faint);
@@ -1167,30 +1194,22 @@ impl App {
         // Separate files or one, when there is more than one piece.
         let mut left = er.x;
         if self.doc.as_ref().is_some_and(|d| d.plan.on.len() > 1) {
-            let one = c.text.measure("One file", 13.0 * s) + 18.0 * s + 6.0 * s + 24.0 * s;
-            let sep = c.text.measure("Separate files", 13.0 * s) + 18.0 * s + 6.0 * s + 24.0 * s;
+            let one = c.text.measure(tr!("header.one_file"), 13.0 * s) + 18.0 * s + 6.0 * s + 24.0 * s;
+            let sep = c.text.measure(tr!("header.separate_files"), 13.0 * s) + 18.0 * s + 6.0 * s + 24.0 * s;
             let join = self.join;
             let (ro, rs) = (Rect::new(left - 8.0 * s - one, by, one, bh), Rect::new(left - 8.0 * s - one - 2.0 * s - sep, by, sep, bh));
             let on = |yes: bool| if yes { Style::On } else { Style::Secondary };
-            self.button(
-                c,
-                ro,
-                Act::Join(true),
-                "Join the kept pieces, in order, into one file, without re-encoding",
-                Some(Icon::File),
-                Some("One file"),
-                on(join),
-            );
-            self.button(c, rs, Act::Join(false), "Write each kept piece to its own file", Some(Icon::Files), Some("Separate files"), on(!join));
+            self.button(c, ro, Act::Join(true), tr!("tip.one_file"), Some(Icon::File), Some(tr!("header.one_file")), on(join));
+            self.button(c, rs, Act::Join(false), tr!("tip.separate_files"), Some(Icon::Files), Some(tr!("header.separate_files")), on(!join));
             left = rs.x;
         }
-        let ow = c.text.measure("Open", 13.0 * s) + 18.0 * s + 6.0 * s + 28.0 * s;
+        let ow = c.text.measure(tr!("header.open"), 13.0 * s) + 18.0 * s + 6.0 * s + 28.0 * s;
         let or = Rect::new(left - 8.0 * s - ow, by, ow, bh);
         let ir = Rect::new(or.x - 4.0 * s - bh, by, bh, bh);
-        self.button(c, ir, Act::About, "About MP4 Splitter (F1)", Some(Icon::Info), None, Style::Ghost);
+        self.button(c, ir, Act::About, tr!("tip.about"), Some(Icon::Info), None, Style::Ghost);
         let gr = Rect::new(ir.x - 2.0 * s - bh, by, bh, bh);
-        self.button(c, gr, Act::Settings, "Settings (Ctrl+,)", Some(Icon::Gear), None, Style::Ghost);
-        self.button(c, or, Act::Open, "Open a video (Ctrl+O), or drop one on the window", Some(Icon::Folder), Some("Open"), Style::Secondary);
+        self.button(c, gr, Act::Settings, tr!("tip.settings"), Some(Icon::Gear), None, Style::Ghost);
+        self.button(c, or, Act::Open, tr!("tip.open"), Some(Icon::Folder), Some(tr!("header.open")), Style::Secondary);
         // What the file is; its name and the app's are in the window's title bar.
         if let Some(d) = &self.doc {
             let mut meta = Vec::new();
@@ -1204,7 +1223,7 @@ impl App {
                 meta.push(codec_name(cdc));
             }
             if !d.info.has_audio {
-                meta.push("no sound".into());
+                meta.push(tr!("header.no_sound").into());
             }
             meta.push(split::timecode(d.info.duration));
             let meta = ellipsize(c.text, &meta.join("  ·  "), 12.0 * s, gr.x - x - 16.0 * s);
@@ -1223,10 +1242,10 @@ impl App {
             c.rrect(r, 14.0 * s, if hover { crate::paint::hex(0xFFFFFF, 10) } else { crate::paint::hex(0xFFFFFF, 5) });
             dashed_rrect(c, r, 14.0 * s, crate::paint::hex(0xFFFFFF, if hover { 70 } else { 40 }));
             c.icon(Icon::Film, Rect::new(r.cx() - 18.0 * s, r.y + 30.0 * s, 36.0 * s, 36.0 * s), crate::paint::hex(0xA3A7B3, 255));
-            c.text(r.cx(), r.y + 98.0 * s, 15.0 * s, crate::paint::hex(0xECEEF3, 255), "Drop an MP4 here, or click to open one", Align::Center);
-            c.text(r.cx(), r.y + 122.0 * s, 12.0 * s, crate::paint::hex(0x9296A3, 255), "Lossless: pieces are copied, never re-encoded", Align::Center);
+            c.text(r.cx(), r.y + 98.0 * s, 15.0 * s, crate::paint::hex(0xECEEF3, 255), tr!("preview.drop"), Align::Center);
+            c.text(r.cx(), r.y + 122.0 * s, 12.0 * s, crate::paint::hex(0x9296A3, 255), tr!("preview.lossless"), Align::Center);
             if !self.decoder {
-                c.text(l.preview.cx(), r.bottom() + 30.0 * s, 12.0 * s, t.error, player::NO_DECODER_HINT, Align::Center);
+                c.text(l.preview.cx(), r.bottom() + 30.0 * s, 12.0 * s, t.error, player::no_decoder().1, Align::Center);
             }
             return;
         };
@@ -1237,11 +1256,11 @@ impl App {
             None => {
                 c.rrect(r, PREVIEW_RADIUS * s, crate::paint::hex(0xFFFFFF, 6));
                 let msg = if d.info.frames.is_empty() {
-                    "No video track (sound only)"
+                    tr!("preview.no_video")
                 } else if !d.src.available {
-                    player::NO_DECODER_PREVIEW
+                    player::no_decoder().2
                 } else {
-                    "Loading…"
+                    tr!("preview.loading")
                 };
                 c.text(r.cx(), r.cy() + 5.0 * s, 13.0 * s, crate::paint::hex(0x9296A3, 255), msg, Align::Center);
             }
@@ -1249,7 +1268,7 @@ impl App {
         // Outside the kept part: say so on the picture.
         let ph = self.playhead;
         if ph < d.plan.start || ph > d.plan.end {
-            let tag = "Cut away";
+            let tag = tr!("preview.cut_away");
             let tw = c.text.measure(tag, 12.0 * s) + 20.0 * s;
             let tr = Rect::new(r.x + 12.0 * s, r.y + 12.0 * s, tw, 26.0 * s);
             c.rrect(tr, 13.0 * s, crate::paint::hex(0, 170));
@@ -1274,8 +1293,9 @@ impl App {
         if !d.info.frames.is_empty() {
             let fi = split::frame_index(&d.info.frames, ph) + 1;
             let key = d.info.keys.binary_search(&d.info.frames[fi - 1]).is_ok();
-            let label = format!("   frame {fi}{}", if key { " · key" } else { "" });
-            c.text(x, cy + 6.5 * s, 12.0 * s, t.text_faint, &label, Align::Left);
+            let key_note = if key { format!(" · {}", tr!("controls.key")) } else { String::new() };
+            let label = format!("{}{key_note}", tr!("controls.frame", n = fi));
+            c.text(x + 12.0 * s, cy + 6.5 * s, 12.0 * s, t.text_faint, &label, Align::Left);
         }
         // Transport, centred.
         let b = 36.0 * s;
@@ -1284,10 +1304,7 @@ impl App {
         let total = 4.0 * b + big + 4.0 * gap;
         let mut bx = (r.cx() - total / 2.0).max(r.x + 300.0 * s);
         let playing = self.playing.is_some();
-        for (act, icon, tip) in [
-            (Act::ToStart, Icon::ToStart, "Go to the start of the kept part (again: the very start)"),
-            (Act::FrameBack, Icon::FrameBack, "Previous frame (←; Shift: 1 s)"),
-        ] {
+        for (act, icon, tip) in [(Act::ToStart, Icon::ToStart, tr!("tip.to_start")), (Act::FrameBack, Icon::FrameBack, tr!("tip.frame_back"))] {
             self.button(c, Rect::new(bx, cy - b / 2.0, b, b), act, tip, Some(icon), None, Style::Ghost);
             bx += b + gap;
         }
@@ -1295,15 +1312,13 @@ impl App {
             c,
             Rect::new(bx, cy - big / 2.0, big, big),
             Act::Play,
-            "Play / pause (Space)",
+            tr!("tip.play"),
             Some(if playing { Icon::Pause } else { Icon::Play }),
             None,
             Style::Round,
         );
         bx += big + gap;
-        for (act, icon, tip) in
-            [(Act::FrameFwd, Icon::FrameFwd, "Next frame (→; Shift: 1 s)"), (Act::ToEnd, Icon::ToEnd, "Go to the end of the kept part (again: the very end)")]
-        {
+        for (act, icon, tip) in [(Act::FrameFwd, Icon::FrameFwd, tr!("tip.frame_fwd")), (Act::ToEnd, Icon::ToEnd, tr!("tip.to_end"))] {
             self.button(c, Rect::new(bx, cy - b / 2.0, b, b), act, tip, Some(icon), None, Style::Ghost);
             bx += b + gap;
         }
@@ -1312,16 +1327,11 @@ impl App {
         let snap = self.snap;
         let muted = self.muted;
         let items: [(Act, Icon, &'static str, Style); 5] = [
-            (Act::Mute, if muted { Icon::Muted } else { Icon::Volume }, "Mute (M)", if muted { Style::On } else { Style::Ghost }),
-            (
-                Act::Snap,
-                Icon::KeyFrame,
-                "Snap to key frames (N): pieces then start exactly on a key frame, for players that ignore edit lists",
-                if snap { Style::On } else { Style::Ghost },
-            ),
-            (Act::MarkOut, Icon::MarkOut, "Set the end at the playhead (O)", Style::Ghost),
-            (Act::Cut, Icon::Scissors, "Cut at the playhead (S); double-click the timeline to cut there", Style::Ghost),
-            (Act::MarkIn, Icon::MarkIn, "Set the start at the playhead (I)", Style::Ghost),
+            (Act::Mute, if muted { Icon::Muted } else { Icon::Volume }, tr!("tip.mute"), if muted { Style::On } else { Style::Ghost }),
+            (Act::Snap, Icon::KeyFrame, tr!("tip.snap"), if snap { Style::On } else { Style::Ghost }),
+            (Act::MarkOut, Icon::MarkOut, tr!("tip.mark_out"), Style::Ghost),
+            (Act::Cut, Icon::Scissors, tr!("tip.cut"), Style::Ghost),
+            (Act::MarkIn, Icon::MarkIn, tr!("tip.mark_in"), Style::Ghost),
         ];
         for (i, (act, icon, tip, style)) in items.into_iter().enumerate() {
             if act == Act::Mute && !has_audio {
@@ -1352,18 +1362,13 @@ impl App {
         let mut x = r.x + 4.0 * s;
         c.icon(Icon::Columns, Rect::new(x, cy - 8.0 * s, 16.0 * s, 16.0 * s), t.icon);
         x += 22.0 * s;
-        x += c.text(x, cy + 4.5 * s, 13.0 * s, t.text_muted, "Split into", Align::Left) + 10.0 * s;
+        x += c.text(x, cy + 4.5 * s, 13.0 * s, t.text_muted, tr!("tools.split_into"), Align::Left) + 10.0 * s;
         let bh = 30.0 * s;
         for n in 2..=5usize {
             let w = 34.0 * s;
             let style = if pieces == n && self.equal_split(n) { Style::On } else { Style::Secondary };
             let label = n.to_string();
-            let tip: &'static str = match n {
-                2 => "Two equal pieces (2)",
-                3 => "Three equal pieces (3)",
-                4 => "Four equal pieces (4)",
-                _ => "Five equal pieces (5)",
-            };
+            let tip = crate::i18n::tip_n("tip.preset", n as u64);
             self.button(c, Rect::new(x, cy - bh / 2.0, w, bh), Act::Preset(n), tip, None, Some(&label), style);
             x += w + 6.0 * s;
         }
@@ -1372,34 +1377,27 @@ impl App {
         let grp = Rect::new(x, cy - bh / 2.0, 30.0 * s * 2.0 + 34.0 * s, bh);
         c.rrect(grp, 8.0 * s, t.surface);
         c.rrect_stroke(grp, 8.0 * s, 1.0 * s, t.border);
-        self.button(c, Rect::new(x, grp.y, 30.0 * s, bh), Act::NMinus, "Fewer pieces", Some(Icon::Minus), None, Style::Ghost);
+        self.button(c, Rect::new(x, grp.y, 30.0 * s, bh), Act::NMinus, tr!("tip.fewer"), Some(Icon::Minus), None, Style::Ghost);
         let n = self.n;
         c.text(x + 30.0 * s + 17.0 * s, cy + 4.5 * s, 13.0 * s, t.text, &n.to_string(), Align::Center);
-        self.button(c, Rect::new(x + 64.0 * s, grp.y, 30.0 * s, bh), Act::NPlus, "More pieces", Some(Icon::Plus), None, Style::Ghost);
+        self.button(c, Rect::new(x + 64.0 * s, grp.y, 30.0 * s, bh), Act::NPlus, tr!("tip.more"), Some(Icon::Plus), None, Style::Ghost);
         x = grp.right() + 6.0 * s;
-        let lbl = format!("Split in {n}");
+        let lbl = tr!("tools.split_in", n = n);
         let w = c.text.measure(&lbl, 13.0 * s) + 18.0 * s + 6.0 * s + 24.0 * s;
         let style = if pieces == n && self.equal_split(n) { Style::On } else { Style::Secondary };
-        self.button(
-            c,
-            Rect::new(x, cy - bh / 2.0, w, bh),
-            Act::NApply,
-            "Split the kept part into this many equal pieces",
-            Some(Icon::Columns),
-            Some(&lbl),
-            style,
-        );
+        self.button(c, Rect::new(x, cy - bh / 2.0, w, bh), Act::NApply, tr!("tip.split_in"), Some(Icon::Columns), Some(&lbl), style);
         x += w + 6.0 * s;
         if has_cuts {
-            self.button(c, Rect::new(x, cy - bh / 2.0, bh, bh), Act::ClearCuts, "Remove all cuts (0)", Some(Icon::Trash), None, Style::Ghost);
+            self.button(c, Rect::new(x, cy - bh / 2.0, bh, bh), Act::ClearCuts, tr!("tip.clear_cuts"), Some(Icon::Trash), None, Style::Ghost);
             x += bh;
         }
         // The summary, on the right.
-        let summary = format!("{}  ·  {} piece{}", split::timecode(kept), kept_pieces, if kept_pieces == 1 { "" } else { "s" });
+        let summary = format!("{}  ·  {}", split::timecode(kept), trn!("tools.pieces", kept_pieces));
         let sw = c.text.measure(&summary, 13.0 * s);
         if r.right() - sw > x + 20.0 * s {
-            let lw = c.text.measure("Kept ", 13.0 * s);
-            c.text(r.right() - 4.0 * s - sw - lw, cy + 4.5 * s, 13.0 * s, t.text_muted, "Kept ", Align::Left);
+            let kept_label = tr!("tools.kept");
+            let lw = c.text.measure(kept_label, 13.0 * s) + 4.0 * s;
+            c.text(r.right() - 4.0 * s - sw - lw, cy + 4.5 * s, 13.0 * s, t.text_muted, kept_label, Align::Left);
             c.text(r.right() - 4.0 * s, cy + 4.5 * s, 13.0 * s, t.text, &summary, Align::Right);
         }
     }
@@ -1420,7 +1418,7 @@ impl App {
         let l = self.l;
         let s = l.s;
         let Some(d) = &self.doc else {
-            c.text(l.card.cx(), l.card.cy() + 5.0 * s, 13.0 * s, t.text_faint, "The timeline shows here once a video is open", Align::Center);
+            c.text(l.card.cx(), l.card.cy() + 5.0 * s, 13.0 * s, t.text_faint, tr!("timeline.empty"), Align::Center);
             return;
         };
         let (va, vb) = d.view;
@@ -1521,9 +1519,9 @@ impl App {
                 x += step;
             }
         } else if d.info.has_audio && d.src.available {
-            c.text(wave.cx(), wave.cy() + 4.0 * s, 11.0 * s, t.text_faint, "Reading the sound…", Align::Center);
+            c.text(wave.cx(), wave.cy() + 4.0 * s, 11.0 * s, t.text_faint, tr!("timeline.reading"), Align::Center);
         } else if !d.info.has_audio {
-            c.text(wave.cx(), wave.cy() + 4.0 * s, 11.0 * s, t.text_faint, "No sound", Align::Center);
+            c.text(wave.cx(), wave.cy() + 4.0 * s, 11.0 * s, t.text_faint, tr!("timeline.no_sound"), Align::Center);
         }
         // Cut away: dimmed.
         let xs = x_of(d.plan.start).clamp(track.x, track.right());
@@ -1620,7 +1618,7 @@ impl App {
                 c.line(tx - 1.0 * s, pr.cy(), tx + tw + 1.0 * s, pr.cy(), 1.0 * s, t.text_muted);
             }
             if !one {
-                self.hits.push((pr, Act::Piece(i), if on { "Leave this piece out (Delete at the playhead)" } else { "Put this piece back" }, self.part));
+                self.hits.push((pr, Act::Piece(i), if on { tr!("tip.drop_piece") } else { tr!("tip.keep_piece") }, self.part));
             }
         }
         // Where the pointer is.
@@ -1678,7 +1676,7 @@ impl App {
         let maxw = self.l.w - 120.0 * s;
         let text = ellipsize(c.text, &text, px, maxw - 160.0 * s);
         let tw = c.text.measure(&text, px);
-        let extra = if reveal { c.text.measure("Show folder", px) + 52.0 * s } else { 0.0 } + 36.0 * s;
+        let extra = if reveal { c.text.measure(tr!("msg.show_folder"), px) + 52.0 * s } else { 0.0 } + 36.0 * s;
         let w = tw + 40.0 * s + extra;
         let r = Rect::new(self.l.w / 2.0 - w / 2.0, self.l.preview.bottom() - 60.0 * s, w, 42.0 * s);
         c.shadow(r, 12.0 * s);
@@ -1687,12 +1685,12 @@ impl App {
         c.text(r.x + 32.0 * s, r.cy() + 4.5 * s, px, t.tooltip_text, &text, Align::Left);
         let mut x = r.x + 32.0 * s + tw + 10.0 * s;
         if reveal {
-            let bw = c.text.measure("Show folder", px) + 42.0 * s;
+            let bw = c.text.measure(tr!("msg.show_folder"), px) + 42.0 * s;
             let br = Rect::new(x, r.cy() - 14.0 * s, bw, 28.0 * s);
             let hover = self.hit_hover(br);
             c.rrect(br, 7.0 * s, if hover { t.accent_hover } else { t.accent });
             c.icon(Icon::Folder, Rect::new(br.x + 10.0 * s, br.cy() - 8.0 * s, 16.0 * s, 16.0 * s), t.on_accent);
-            c.text(br.x + 32.0 * s, br.cy() + 4.5 * s, px, t.on_accent, "Show folder", Align::Left);
+            c.text(br.x + 32.0 * s, br.cy() + 4.5 * s, px, t.on_accent, tr!("msg.show_folder"), Align::Left);
             self.hits.push((br, Act::ShowFolder, "", OVER));
             x += bw + 4.0 * s;
         }
@@ -1709,8 +1707,8 @@ impl App {
         let s = self.l.s;
         let (w, h) = match page {
             // Its one-line description, with margins.
-            Page::About => (Text::new().measure(ABOUT_LINE, 13.0 * s) + 64.0 * s, 296.0 * s),
-            Page::Settings => (420.0 * s, 212.0 * s),
+            Page::About => (Text::new().measure(tr!("about.line"), 13.0 * s) + 64.0 * s, 296.0 * s),
+            Page::Settings => (680.0 * s, (166.0 + 28.0 * crate::i18n::languages().count().div_ceil(4).max(1) as f32 + 28.0 + 20.0) * s),
         };
         Rect::new((self.l.w - w) / 2.0, (self.l.h - h) / 2.0, w, h)
     }
@@ -1730,15 +1728,37 @@ impl App {
     }
 
     fn draw_settings(&mut self, c: &mut Canvas) {
+        let r = self.draw_page(c, Page::Settings);
+        // Reads the language's way; the page is in the middle, so its mirror
+        // image is on itself.
+        let rtl = crate::i18n::is_rtl();
+        self.mirrored = rtl;
+        c.fb.mirror = rtl;
+        self.settings_rows(c, r);
+        self.mirrored = false;
+        c.fb.mirror = false;
+        if rtl {
+            // Inside its corners: what shows past them is the window behind.
+            let inset = (16.0 * self.l.s).ceil() as i32;
+            let (x0, y0) = (r.x.round() as i32 + inset, r.y.round() as i32 + inset);
+            c.fb.flip_rect(x0, y0, self.l.w as i32 - x0, r.bottom().round() as i32 - inset);
+        }
+    }
+
+    fn settings_rows(&mut self, c: &mut Canvas, r: Rect) {
         let t = self.theme;
         let s = self.l.s;
-        let r = self.draw_page(c, Page::Settings);
-        c.text(r.x + 24.0 * s, r.y + 40.0 * s, 18.0 * s, t.text, "Settings", Align::Left);
+        let left = r.x + 24.0 * s;
+        c.text(left, r.y + 40.0 * s, 18.0 * s, t.text, tr!("settings.title"), Align::Left);
         // Theme.
         let y = r.y + 62.0 * s;
-        c.text(r.x + 24.0 * s, y + 21.0 * s, 13.0 * s, t.text_muted, "Theme", Align::Left);
+        c.text(left, y + 21.0 * s, 13.0 * s, t.text_muted, tr!("settings.theme"), Align::Left);
         let mut x = r.x + 120.0 * s;
-        for (choice, label) in [(ThemeChoice::System, "System"), (ThemeChoice::Dark, "Dark"), (ThemeChoice::Light, "Light")] {
+        for (choice, label) in [
+            (ThemeChoice::System, tr!("settings.theme.system")),
+            (ThemeChoice::Dark, tr!("settings.theme.dark")),
+            (ThemeChoice::Light, tr!("settings.theme.light")),
+        ] {
             let w = c.text.measure(label, 13.0 * s) + 24.0 * s;
             let style = if self.config.theme == choice { Style::On } else { Style::Secondary };
             self.button(c, Rect::new(x, y, w, 32.0 * s), Act::Theme(choice), "", None, Some(label), style);
@@ -1746,7 +1766,7 @@ impl App {
         }
         // Accent.
         let y = y + 50.0 * s;
-        c.text(r.x + 24.0 * s, y + 21.0 * s, 13.0 * s, t.text_muted, "Accent", Align::Left);
+        c.text(left, y + 21.0 * s, 13.0 * s, t.text_muted, tr!("settings.accent"), Align::Left);
         let mut x = r.x + 120.0 * s;
         let d = 28.0 * s;
         for (i, (dark, light)) in theme::ACCENTS.iter().enumerate() {
@@ -1756,8 +1776,18 @@ impl App {
             if self.config.accent == i {
                 c.ring(sw.cx(), sw.cy(), d / 2.0 - 0.5 * s, 1.5 * s, col);
             }
-            self.hits.push((sw, Act::Accent(i), "", OVER));
+            self.hits.push((self.on_screen(sw), Act::Accent(i), "", OVER));
             x += d + 8.0 * s;
+        }
+        // Language: the system's, then each in itself.
+        let y = y + 54.0 * s;
+        c.text(left, y, 13.0 * s, t.text_muted, tr!("settings.language"), Align::Left);
+        let names = std::iter::once((tr!("settings.language.system"), "")).chain(crate::i18n::languages().map(|l| (l.name, l.tag)));
+        let (cell, row) = ((r.w - 48.0 * s) / 4.0, 28.0 * s);
+        for (i, (name, tag)) in names.enumerate() {
+            let cr = Rect::new(left + (i % 4) as f32 * cell, y + 10.0 * s + (i / 4) as f32 * row, cell - 4.0 * s, row - 3.0 * s);
+            let style = if self.config.language == tag { Style::On } else { Style::Ghost };
+            self.button(c, cr, Act::Language(i), "", None, Some(name), style);
         }
     }
 
@@ -1772,12 +1802,12 @@ impl App {
         c.rrect(mr, 18.0 * s, t.accent);
         c.icon(Icon::Scissors, mr.inset(14.0 * s, 14.0 * s), t.on_accent);
         c.text(cx, mr.bottom() + 36.0 * s, 22.0 * s, t.text, "MP4 Splitter", Align::Center);
-        c.text(cx, mr.bottom() + 58.0 * s, 13.0 * s, t.text_muted, concat!("Version ", env!("CARGO_PKG_VERSION")), Align::Center);
-        c.text(cx, mr.bottom() + 88.0 * s, 13.0 * s, t.text, ABOUT_LINE, Align::Center);
+        c.text(cx, mr.bottom() + 58.0 * s, 13.0 * s, t.text_muted, &tr!("about.version", version = env!("CARGO_PKG_VERSION")), Align::Center);
+        c.text(cx, mr.bottom() + 88.0 * s, 13.0 * s, t.text, tr!("about.line"), Align::Center);
         let sep = mr.bottom() + 106.0 * s;
         c.rect(Rect::new(r.x + 24.0 * s, sep, r.w - 48.0 * s, 1.0 * s), t.separator);
         // More from PowerNapps.
-        let label = "More from PowerNapps";
+        let label = tr!("about.more");
         let link = "powernapps.net";
         let (lw, kw) = (c.text.measure(label, 13.0 * s), c.text.measure(link, 13.0 * s));
         let x0 = cx - (lw + 8.0 * s + kw) / 2.0;
@@ -1791,7 +1821,7 @@ impl App {
         }
         self.hits.push((hit, Act::AboutLink, "", OVER));
         // The footer. The font has no copyright sign: a ring with a small c.
-        let foot = "2026 PowerNapps  ·  Made in Los Angeles by Denis Platonov  ·  Apache-2.0 License";
+        let foot = tr!("about.footer");
         let px = 11.5 * s;
         let rad = 5.0 * s;
         let fw = c.text.measure(foot, px) + 2.0 * rad + 5.0 * s;
@@ -2139,6 +2169,57 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A window that does nothing.
+    struct NoWindow;
+
+    impl Host for NoWindow {
+        fn size(&self) -> (u32, u32) {
+            (1180, 780)
+        }
+        fn scale(&self) -> f32 {
+            1.0
+        }
+        fn redraw(&self, _: Option<(u32, u32)>) {}
+        fn set_title(&self, _: &str) {}
+        fn set_cursor(&self, _: CursorKind) {}
+        fn set_colors(&self, _: &Theme) {}
+        fn wake(&self) -> Wake {
+            Arc::new(|| {})
+        }
+        fn pick_file(&self, _: Option<PathBuf>, _: crate::shell::Picked) {}
+        fn pick_folder(&self, _: Option<PathBuf>, _: crate::shell::Picked) {}
+    }
+
+    /// Windows asks for a paint whenever the window is uncovered, with nothing
+    /// new to draw: what can be clicked must stay.
+    #[test]
+    fn a_paint_with_nothing_to_draw_keeps_every_control() {
+        let mut app = App::new(Box::new(NoWindow), Some(true), None);
+        app.on_key(Key::F1);
+        app.paint();
+        let before = app.hits.len();
+        assert!(app.hits.iter().any(|h| h.1 == Act::AboutLink), "the page's link");
+        app.paint();
+        assert_eq!(app.hits.len(), before);
+        assert!(app.hits.iter().any(|h| h.1 == Act::AboutLink), "the page's link, still");
+        assert!(app.hits.iter().any(|h| h.1 == Act::Open), "and what is under it");
+    }
+
+    /// Redrawing one band renews its controls and leaves the others'.
+    #[test]
+    fn a_band_redraw_keeps_the_other_bands_controls() {
+        let mut app = App::new(Box::new(NoWindow), Some(true), None);
+        app.paint();
+        let opens = |a: &App| a.hits.iter().filter(|h| h.1 == Act::Open).count();
+        assert_eq!(opens(&app), 1);
+        app.redraw_parts(TIMELINE);
+        app.paint();
+        assert_eq!(opens(&app), 1, "not lost");
+        app.redraw_parts(HEADER);
+        app.paint();
+        assert_eq!(opens(&app), 1, "not doubled");
+    }
 
     #[test]
     fn the_picture_rectangle_stays_on_the_preview_at_any_scale() {

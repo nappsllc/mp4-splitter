@@ -11,7 +11,9 @@ Copyright 2026 PowerNapps, licensed under the Apache License, Version 2.0:
   src/objects.rs (from src/objects); src/shell_win.rs (from src/wind_win.rs);
   src/dialogs.rs (from src/ui/folder_dialog.rs);
   src/mf.rs and src/player_win.rs (from src/rec/win/mf.rs and src/rec/cut/decode.rs);
-  src/audio_win.rs (from src/rec/win/wasapi.rs).
+  src/audio_win.rs (from src/rec/win/wasapi.rs);
+  src/plural.rs and src/i18n.rs (from src/i18n); src/ostext.rs (from src/uitext.rs
+  and src/text_win.rs).
 
 It also includes the Inter font (assets/fonts/Inter-Medium.subset.ttf),
 Copyright 2016 The Inter Project Authors, under the SIL Open Font License 1.1
