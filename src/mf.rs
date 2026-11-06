@@ -8,6 +8,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use std::ffi::c_void;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0};
@@ -186,6 +187,42 @@ fn next(r: &IMFSourceReader, stream: u32) -> Option<(i64, IMFSample)> {
     }
 }
 
+/// Whether this system's MP4 source honours edit lists: not yet known (0), no
+/// (1), yes (2). It differs by Windows version and is the same for every file.
+static HONOURS: AtomicU8 = AtomicU8::new(0);
+
+fn edits_known() -> Option<bool> {
+    match HONOURS.load(Ordering::Relaxed) {
+        1 => Some(false),
+        2 => Some(true),
+        _ => None,
+    }
+}
+
+fn remember_edits(yes: bool) {
+    HONOURS.store(if yes { 2 } else { 1 }, Ordering::Relaxed);
+}
+
+/// Has it been found out yet whether edit lists are honoured here?
+pub fn edits_found_out() -> bool {
+    edits_known().is_some()
+}
+
+/// Sources differ: one that ignores edit lists gives every sample its time in
+/// the file's media timeline; one that honours them starts its clock where the
+/// edit list does, and drops what comes before. Seek to the key frame at `key`
+/// in the file: the first gives back exactly that time, the second takes it for
+/// a later one and gives back another key frame, on its own clock.
+fn honours_edits(key: i64, got: i64) -> bool {
+    (got - key).abs() > 10_000 // 1 ms
+}
+
+/// What to add to the source's clock for a track whose edit list starts at
+/// `zero` in the media timeline. (Not known: as if ignored, the older systems' way.)
+fn edit_shift(zero: i64) -> i64 {
+    if edits_known() == Some(true) { zero } else { 0 }
+}
+
 /// How NV12 turns into BGRA: the colour matrix and the range.
 #[derive(Clone, Copy)]
 struct Yuv {
@@ -295,7 +332,7 @@ pub struct VideoReader {
     yuv: Yuv,
     /// Quarter turns clockwise to show it upright.
     turn: u8,
-    /// Add to Media Foundation's clock for the file's (see [`VideoReader::open`]).
+    /// Add to Media Foundation's clock for the file's ([`edit_shift`]).
     shift: i64,
     _gpu: Option<Gpu>,
 }
@@ -304,12 +341,11 @@ pub struct VideoReader {
 unsafe impl Send for VideoReader {}
 
 impl VideoReader {
-    /// The reader for `path`, whose first picture is at `first` (100 ns) in
-    /// its media timeline. Whatever the system's MP4 source does with edit
-    /// lists (older ones ignore them, newer ones start the clock where they
-    /// say), the first picture read shows how its clock relates to the file's,
-    /// and times here are always the file's.
-    pub fn open(path: &Path, hardware: bool, turn: u8, first: i64) -> Result<VideoReader> {
+    /// The reader for `path`, whose edit list starts at `zero` in its media
+    /// timeline (100 ns), with a key frame at `key`, if it has one past the
+    /// first. Times here are always the file's, whatever the system's MP4
+    /// source does with edit lists ([`honours_edits`]).
+    pub fn open(path: &Path, hardware: bool, turn: u8, zero: i64, key: Option<i64>) -> Result<VideoReader> {
         com_init();
         let gpu = if hardware { gpu() } else { None };
         let r = reader(path, gpu.as_ref())?;
@@ -336,8 +372,15 @@ impl VideoReader {
             let range = cur.GetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE).unwrap_or(0);
             let bt709 = if matrix == MFVideoTransferMatrix_BT601.0 as u32 { false } else { matrix == MFVideoTransferMatrix_BT709.0 as u32 || shown.1 >= 720 };
             let yuv = Yuv::of(bt709, range == MFNominalRange_0_255.0 as u32);
-            let shift = next(&r, VIDEO).map_or(0, |(ts, _)| first - ts);
-            seek(&r, 0)?;
+            // A key frame's time shows how this system's clock relates to the file's.
+            if let (Some(k), None) = (key.filter(|_| zero != 0), edits_known()) {
+                seek(&r, k)?;
+                if let Some((ts, _)) = next(&r, VIDEO) {
+                    remember_edits(honours_edits(k, ts));
+                }
+                seek(&r, 0)?;
+            }
+            let shift = edit_shift(zero);
             Ok(VideoReader { r, coded, shown, stride, yuv, turn, shift, _gpu: gpu })
         }
     }
@@ -390,7 +433,7 @@ pub struct AudioReader {
     r: IMFSourceReader,
     pub rate: u32,
     pub channels: u16,
-    /// Add to Media Foundation's clock for the file's: sound starts at 0 there.
+    /// Add to Media Foundation's clock for the file's ([`edit_shift`]).
     shift: i64,
 }
 
@@ -398,7 +441,9 @@ pub struct AudioReader {
 unsafe impl Send for AudioReader {}
 
 impl AudioReader {
-    pub fn open(path: &Path) -> Result<AudioReader> {
+    /// The reader for `path`, whose sound's edit list starts at `zero` in its
+    /// media timeline (100 ns).
+    pub fn open(path: &Path, zero: i64) -> Result<AudioReader> {
         let r = reader(path, None)?;
         // SAFETY: as Media Foundation documents.
         unsafe {
@@ -411,9 +456,7 @@ impl AudioReader {
             let cur = r.GetCurrentMediaType(AUDIO)?;
             let rate = cur.GetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND)?;
             let channels = cur.GetUINT32(&MF_MT_AUDIO_NUM_CHANNELS)? as u16;
-            let shift = next(&r, AUDIO).map_or(0, |(ts, _)| -ts);
-            seek(&r, 0)?;
-            Ok(AudioReader { r, rate, channels, shift })
+            Ok(AudioReader { r, rate, channels, shift: edit_shift(zero) })
         }
     }
 
@@ -460,6 +503,44 @@ mod tests {
         assert_eq!(&p[..4], &[255, 255, 255, 255]);
         assert_eq!(&p[4..8], &[0, 0, 0, 255]);
         assert!(nv12_to_bgra(&nv[..4], 2, 2, 2, 2, 2, 2, Yuv::of(true, false)).is_none(), "too short");
+    }
+
+    /// Both kinds of source, with the times of a real trimmed file: edit list
+    /// at 0.5667 s (a 0.5 s lead-in and two frames of delay), key frame at 1.0667 s.
+    #[test]
+    fn both_kinds_of_source_are_told_apart() {
+        let (zero, key) = (5_666_667, 10_666_667);
+        // It ignores edit lists: the key frame comes back at its own time.
+        assert!(!honours_edits(key, key));
+        assert!(!honours_edits(key, key + 3));
+        // It honours them, clock starting at the edit: seeking to `key` means the
+        // file's key + zero, whose key frame it gives at key - zero on its clock.
+        assert!(honours_edits(key, key - zero));
+        // Two frames of delay only, no lead-in.
+        let (zero, key) = (666_667, 10_666_667);
+        assert!(honours_edits(key, key - zero));
+    }
+
+    /// With the clock taken from the file's edit list, a picture on either
+    /// kind of source lands at the same place in the file: asking for time 0
+    /// of the trimmed file above finds the frame there, not 15 frames on.
+    #[test]
+    fn times_mean_the_same_on_both_kinds_of_source() {
+        let frame = 333_333i64;
+        // The file's media time of frame `n` of the source; 15 is the first shown.
+        let raw = |n: i64| 666_667 + n * frame;
+        let zero = raw(15);
+        // What each kind of source stamps that frame with.
+        let ignoring = |n: i64| raw(n);
+        let honouring = |n: i64| raw(n) - zero;
+        let want = zero; // time 0
+        for (stamp, shift) in [(&ignoring as &dyn Fn(i64) -> i64, 0), (&honouring, zero)] {
+            // The first of the frames, in order, that reaches the time asked for.
+            let found = (0..120).find(|&n| stamp(n) + shift + frame / 2 >= want);
+            assert_eq!(found, Some(15));
+            // And where a seek for it goes on the source's clock.
+            assert_eq!(want - shift, stamp(15));
+        }
     }
 
     #[test]
@@ -522,7 +603,7 @@ mod tests {
             let info = crate::mp4::info(&mut std::io::BufReader::new(std::fs::File::open(p).unwrap())).unwrap();
             println!("{name}: info frames {:?}.. of {}; keys {:?}", &info.frames[..3], info.frames.len(), &info.keys[..2]);
             for hw in [false, true] {
-                let mut v = VideoReader::open(p, hw, 0, 0).unwrap();
+                let mut v = VideoReader::open(p, hw, 0, 0, None).unwrap();
                 println!("  hw={hw} coded {:?} shown {:?} stride {}", v.coded, v.shown, v.stride);
                 let mut got = Vec::new();
                 for _ in 0..4 {
@@ -545,7 +626,7 @@ mod tests {
                 }
                 println!("  60 frames: {:?}", t.elapsed());
             }
-            let mut a = AudioReader::open(p).unwrap();
+            let mut a = AudioReader::open(p, 0).unwrap();
             let (ts, s) = a.next().unwrap();
             println!("  audio {} Hz {} ch, first packet at {} s, {} samples", a.rate, a.channels, ts as f64 / 1e7, s.len());
         }

@@ -4,8 +4,8 @@
 //! place, on its own thread, and wakes the window when it has something new.
 //!
 //! The readers' times are the file's media timeline, whatever the system's
-//! MP4 source does with edit lists ([`VideoReader::open`]), so a time on the
-//! timeline is `t + zero` there ([`crate::mp4::Info::zero`]).
+//! MP4 source does with edit lists (`crate::mf`), so a time on the timeline is
+//! `t + zero` there ([`crate::mp4::Info::zero`]).
 
 use crate::audio::{self, Output};
 use crate::mf::{AudioReader, Decoded, VideoReader};
@@ -49,8 +49,8 @@ pub struct Source {
     has_frames: bool,
     zero: i64,
     audio_zero: i64,
-    /// The first picture's media time (see [`VideoReader::open`]).
-    first: i64,
+    /// A key frame past the first, in media time: how the system's clock is told.
+    key: Option<i64>,
     turn: u8,
     /// Half a frame (100 ns): how near a picture's time must be.
     half: i64,
@@ -87,7 +87,7 @@ impl Source {
             has_frames: !info.frames.is_empty(),
             zero: hns(info.zero),
             audio_zero: hns(info.audio_zero),
-            first: hns(info.first),
+            key: info.keys.iter().find(|k| !k.is_zero()).map(|k| hns(*k) + hns(info.zero)),
             turn: info.turn,
             half: (5_000_000.0 / info.fps()) as i64,
             decoder: Arc::default(),
@@ -100,11 +100,34 @@ impl Source {
         let mut g = self.decoder.slot.lock().unwrap_or_else(|e| e.into_inner());
         if g.v.is_none() {
             // On the GPU where it can be.
-            g.v = VideoReader::open(&self.path, self.gpu, self.turn, self.first).or_else(|_| VideoReader::open(&self.path, false, self.turn, self.first)).ok();
+            g.v = VideoReader::open(&self.path, self.gpu, self.turn, self.zero, self.key)
+                .or_else(|_| VideoReader::open(&self.path, false, self.turn, self.zero, self.key))
+                .ok();
             g.at = None;
         }
         g.used = Some(Instant::now());
         g
+    }
+
+    /// A reader for the sound: on the clock the pictures' reader found out.
+    fn sound(&self) -> Option<AudioReader> {
+        if self.has_frames {
+            // Opening the picture's reader finds it out; another thread may be at it.
+            for _ in 0..200 {
+                if crate::mf::edits_found_out() {
+                    break;
+                }
+                match self.decoder.slot.try_lock() {
+                    Ok(g) => {
+                        drop(g);
+                        drop(self.slot());
+                        break;
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+        }
+        AudioReader::open(&self.path, self.audio_zero).ok()
     }
 
     /// Close the decoder if nothing has used it for a while; true when it has.
@@ -182,9 +205,9 @@ impl Playback {
             let sh = out.shared.clone();
             let (rate, channels) = (out.rate, out.channels);
             let cap = audio::max_queued(rate, channels);
-            let (path, want, end) = (src.path.clone(), hns(t0) + src.audio_zero, pb.sound_end.clone());
+            let (s, want, end) = (src.clone(), hns(t0) + src.audio_zero, pb.sound_end.clone());
             std::thread::spawn(move || {
-                let Ok(mut a) = AudioReader::open(&path) else {
+                let Some(mut a) = s.sound() else {
                     let _ = end.set((Instant::now(), Duration::ZERO));
                     return;
                 };
@@ -531,9 +554,9 @@ impl Thumbs {
 pub fn load_peaks(src: &Source, wake: Wake) -> Arc<Mutex<Vec<f32>>> {
     let out = Arc::new(Mutex::new(Vec::new()));
     if src.available && src.has_audio {
-        let (o, path, zero) = (Arc::downgrade(&out), src.path.clone(), src.audio_zero);
+        let (o, s, zero) = (Arc::downgrade(&out), src.clone(), src.audio_zero);
         std::thread::spawn(move || {
-            let Ok(mut a) = AudioReader::open(&path) else { return };
+            let Some(mut a) = s.sound() else { return };
             let per = (a.rate / PEAKS_PER_SEC).max(1) as usize * a.channels.max(1) as usize;
             let mut peaks = Vec::<f32>::new();
             let (mut peak, mut n) = (0f32, 0usize);
@@ -642,9 +665,8 @@ mod tests {
         }
     }
 
-    /// The readers' clock is the file's on any system: the first picture and
-    /// the first sound are where the file says, read straight away or after
-    /// going back to the start.
+    /// The readers' clock is the file's on any system: the first picture is
+    /// where the file says, read straight away or after going back to the start.
     #[test]
     fn readers_keep_the_files_time() {
         let Some(ff) = crate::ffmpeg::find() else { return };
@@ -652,15 +674,15 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let p = fixture(&ff, &dir);
         let i = info(&p);
-        let first = hns(i.first);
+        let (zero, key) = (hns(i.zero), hns(i.keys[1]) + hns(i.zero));
         for gpu in [true, false] {
-            let mut v = VideoReader::open(&p, gpu, 0, first).unwrap();
-            assert_eq!(v.next().unwrap().ts, first, "gpu {gpu}");
-            v.seek(first).unwrap();
-            assert_eq!(v.next().unwrap().ts, first, "gpu {gpu}, after seeking");
+            let mut v = VideoReader::open(&p, gpu, 0, zero, Some(key)).unwrap();
+            assert_eq!(v.next().unwrap().ts, zero, "gpu {gpu}");
+            v.seek(zero).unwrap();
+            assert_eq!(v.next().unwrap().ts, zero, "gpu {gpu}, after seeking");
+            v.seek(key).unwrap();
+            assert_eq!(v.next().unwrap().ts, key, "gpu {gpu}, at a key frame");
         }
-        let mut a = AudioReader::open(&p).unwrap();
-        assert_eq!(a.next().unwrap().0, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
