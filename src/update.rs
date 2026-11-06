@@ -841,11 +841,11 @@ mod tests {
     /// Store code (msix.ps1 stops without one, but only when someone packages).
     #[test]
     fn the_store_package_matches_the_app() {
-        let manifest = include_str!("../packaging/windows/AppxManifest.xml.in");
+        let manifest = std::fs::read_to_string("packaging/windows/AppxManifest.xml.in").unwrap();
         assert!(manifest.contains(r#"Executable="mp4-splitter.exe""#));
         assert!(manifest.contains(&format!("<DisplayName>{}</DisplayName>", crate::APP_NAME)));
         assert!(!manifest.contains("internetClient"), "this build makes no requests");
-        let script = include_str!("../packaging/windows/msix.ps1");
+        let script = std::fs::read_to_string("packaging/windows/msix.ps1").unwrap();
         for l in crate::i18n::all_strings() {
             let tag = l.0;
             assert!(script.contains(&format!("'{tag}' = '")), "{tag} has no Store code in msix.ps1");
