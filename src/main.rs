@@ -2,19 +2,31 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
+#[cfg(not(windows))]
+mod audio;
+#[cfg(windows)]
+#[path = "audio_win.rs"]
 mod audio;
 #[allow(dead_code)]
 mod deflate;
 #[cfg(windows)]
 mod dialogs;
 mod export;
+#[cfg(any(not(windows), test))]
+#[cfg_attr(windows, allow(dead_code))]
 mod ffmpeg;
 #[allow(dead_code)]
 mod fonts;
+#[cfg(windows)]
+mod mf;
 mod mp4;
 #[allow(dead_code)]
 mod objects;
 mod paint;
+#[cfg(not(windows))]
+mod player;
+#[cfg(windows)]
+#[path = "player_win.rs"]
 mod player;
 #[allow(dead_code)]
 mod raster;

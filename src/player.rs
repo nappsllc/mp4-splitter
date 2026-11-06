@@ -14,14 +14,34 @@ use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+pub use crate::ffmpeg::PEAKS_PER_SEC;
+
+/// What to say when pictures and sound can't be decoded here.
+pub const NO_DECODER_TOAST: &str = "ffmpeg was not found: no pictures or sound, but splitting works. Install ffmpeg to see the video.";
+pub const NO_DECODER_HINT: &str = "ffmpeg was not found: install it to see pictures and hear sound";
+pub const NO_DECODER_PREVIEW: &str = "No preview: ffmpeg was not found";
+
+/// Can pictures and sound be decoded here?
+pub fn available() -> bool {
+    ffmpeg::find().is_some()
+}
+
 /// The file being worked on, as the workers need it.
 #[derive(Clone)]
 pub struct Source {
-    pub ffmpeg: Option<PathBuf>,
+    pub available: bool,
+    ffmpeg: Option<PathBuf>,
     pub path: PathBuf,
     /// Presentation times of the frames (sorted), for the stream's timing.
     pub frames: Arc<Vec<Duration>>,
     pub has_audio: bool,
+}
+
+impl Source {
+    pub fn new(path: PathBuf, info: &crate::mp4::Info) -> Source {
+        let ffmpeg = ffmpeg::find();
+        Source { available: ffmpeg.is_some(), ffmpeg, path, frames: Arc::new(info.frames.clone()), has_audio: info.has_audio }
+    }
 }
 
 // --- playing ------------------------------------------------------------------

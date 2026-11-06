@@ -4,14 +4,15 @@
 
 use crate::audio::Output;
 use crate::export::{self, Progress};
+use crate::mp4;
 use crate::paint::{Align, C, Canvas, Icon, Picture, Rect, Text};
+use crate::player;
 use crate::player::{Playback, Source, Stills, Thumbs};
 use crate::raster::Order;
 use crate::shell::{Button, CursorKind, Host, Key, Mods, Tick, Wake};
 use crate::split::{self, Marker, Plan};
 use crate::theme::{self, Theme};
 use crate::uifb::Fb;
-use crate::{ffmpeg, mp4};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -145,7 +146,8 @@ pub struct App {
     text: Option<Text>,
     theme: Theme,
     l: Layout,
-    ffmpeg: Option<PathBuf>,
+    /// Pictures and sound can be decoded here.
+    decoder: bool,
     audio: Option<Output>,
     doc: Option<Doc>,
     playhead: Duration,
@@ -189,7 +191,7 @@ impl App {
             text: Some(Text::new()),
             theme,
             l,
-            ffmpeg: ffmpeg::find(),
+            decoder: player::available(),
             audio: None,
             doc: None,
             playhead: Duration::ZERO,
@@ -262,7 +264,7 @@ impl App {
             self.say(format!("{} has nothing to play", file_name(path)), true, None);
             return;
         }
-        let src = Source { ffmpeg: self.ffmpeg.clone(), path: path.to_path_buf(), frames: Arc::new(info.frames.clone()), has_audio: info.has_audio };
+        let src = Source::new(path.to_path_buf(), &info);
         let s = self.l.s.max(1.0);
         let th = (60.0 * s).round() as u32;
         let (vw, vh) = info.size.unwrap_or((16, 9));
@@ -284,8 +286,8 @@ impl App {
         self.playhead = Duration::ZERO;
         self.toast = None;
         self.host.set_title(&format!("{} — MP4 Splitter", file_name(path)));
-        if self.ffmpeg.is_none() {
-            self.say("ffmpeg was not found: no pictures or sound, but splitting works. Install ffmpeg to see the video.", true, None);
+        if !self.decoder {
+            self.say(player::NO_DECODER_TOAST, true, None);
         }
         self.request_still();
         self.redraw();
@@ -357,7 +359,7 @@ impl App {
         let size = self.video_size();
         let t = self.playhead;
         if let Some(d) = &mut self.doc {
-            if size.0 > 0 && d.src.ffmpeg.is_some() && !d.info.frames.is_empty() {
+            if size.0 > 0 && d.src.available && !d.info.frames.is_empty() {
                 d.last_still = d.stills.request(t, size);
             }
         }
@@ -1065,15 +1067,8 @@ impl App {
             c.icon(Icon::Film, Rect::new(r.cx() - 18.0 * s, r.y + 30.0 * s, 36.0 * s, 36.0 * s), crate::paint::hex(0xA3A7B3, 255));
             c.text(r.cx(), r.y + 98.0 * s, 15.0 * s, crate::paint::hex(0xECEEF3, 255), "Drop an MP4 here, or click to open one", Align::Center);
             c.text(r.cx(), r.y + 122.0 * s, 12.0 * s, crate::paint::hex(0x9296A3, 255), "Lossless: pieces are copied, never re-encoded", Align::Center);
-            if self.ffmpeg.is_none() {
-                c.text(
-                    l.preview.cx(),
-                    r.bottom() + 30.0 * s,
-                    12.0 * s,
-                    t.error,
-                    "ffmpeg was not found: install it to see pictures and hear sound",
-                    Align::Center,
-                );
+            if !self.decoder {
+                c.text(l.preview.cx(), r.bottom() + 30.0 * s, 12.0 * s, t.error, player::NO_DECODER_HINT, Align::Center);
             }
             return;
         };
@@ -1086,8 +1081,8 @@ impl App {
                 c.rrect(r, 10.0 * s, crate::paint::hex(0xFFFFFF, 6));
                 let msg = if d.info.frames.is_empty() {
                     "No video track (sound only)"
-                } else if d.src.ffmpeg.is_none() {
-                    "No preview: ffmpeg was not found"
+                } else if !d.src.available {
+                    player::NO_DECODER_PREVIEW
                 } else {
                     "Loading…"
                 };
@@ -1348,7 +1343,7 @@ impl App {
         let wave = l.wave;
         c.line(track.x, wave.y, track.right(), wave.y, 1.0 * s, crate::paint::hex(0, 120));
         if !peaks.is_empty() {
-            let per = crate::ffmpeg::PEAKS_PER_SEC as f64;
+            let per = player::PEAKS_PER_SEC as f64;
             let mid = wave.cy();
             let amp = wave.h * 0.42;
             let step = (1.5 * s).max(1.0);
@@ -1368,7 +1363,7 @@ impl App {
                 }
                 x += step;
             }
-        } else if d.info.has_audio && d.src.ffmpeg.is_some() {
+        } else if d.info.has_audio && d.src.available {
             c.text(wave.cx(), wave.cy() + 4.0 * s, 11.0 * s, t.text_faint, "Reading the sound…", Align::Center);
         } else if !d.info.has_audio {
             c.text(wave.cx(), wave.cy() + 4.0 * s, 11.0 * s, t.text_faint, "No sound", Align::Center);
@@ -1446,7 +1441,8 @@ impl App {
             let full = format!("{}  ·  {}", i + 1, split::timecode(*b - *a));
             let lbl = if c.text.measure(&full, 11.0 * s) + 20.0 * s < x1 - x0 { full } else { (i + 1).to_string() };
             let tw = c.text.measure(&lbl, 11.0 * s);
-            let w = tw + 14.0 * s + 15.0 * s;
+            let one = pieces.len() == 1;
+            let w = tw + 14.0 * s + if one { 0.0 } else { 15.0 * s };
             let cx = (x0 + x1) / 2.0;
             let pr = Rect::new(cx - w / 2.0, l.labels.y + 5.0 * s, w, 18.0 * s);
             let hot = self.hover == Some(Act::Piece(i));
@@ -1454,13 +1450,21 @@ impl App {
             if hot {
                 c.rrect_stroke(pr, 9.0 * s, 1.0 * s, if on { t.accent } else { t.text_muted });
             }
-            let (ix, tx) = (pr.x + 6.0 * s, pr.x + 21.0 * s);
-            c.icon(if on { Icon::Close } else { Icon::Undo }, Rect::new(ix, pr.cy() - 5.5 * s, 11.0 * s, 11.0 * s), if on { t.accent } else { t.text_muted });
+            let (ix, tx) = (pr.x + 6.0 * s, pr.x + if one { 7.0 } else { 21.0 } * s);
+            if !one {
+                c.icon(
+                    if on { Icon::Close } else { Icon::Undo },
+                    Rect::new(ix, pr.cy() - 5.5 * s, 11.0 * s, 11.0 * s),
+                    if on { t.accent } else { t.text_muted },
+                );
+            }
             c.text(tx, pr.cy() + 4.0 * s, 11.0 * s, if on { t.accent } else { t.text_faint }, &lbl, Align::Left);
             if !on {
                 c.line(tx - 1.0 * s, pr.cy(), tx + tw + 1.0 * s, pr.cy(), 1.0 * s, t.text_muted);
             }
-            self.hits.push((pr, Act::Piece(i), if on { "Leave this piece out (Delete at the playhead)" } else { "Put this piece back" }));
+            if !one {
+                self.hits.push((pr, Act::Piece(i), if on { "Leave this piece out (Delete at the playhead)" } else { "Put this piece back" }));
+            }
         }
         // Where the pointer is.
         let (mx, my) = self.mouse;

@@ -816,6 +816,12 @@ pub struct Info {
     pub has_audio: bool,
     /// The video's sample entry (`avc1`, `hvc1`, ...).
     pub video_codec: Option<String>,
+    /// Where time 0 is in the video's and the sound's media timelines, for
+    /// decoders that ignore edit lists.
+    pub zero: Duration,
+    pub audio_zero: Duration,
+    /// Quarter turns clockwise to show the picture upright.
+    pub turn: u8,
 }
 
 impl Info {
@@ -854,11 +860,18 @@ pub fn info<R: Read + Seek>(src: &mut R) -> Result<Info> {
             let turned = matches!((be32(b, m), be32(b, m + 16)), (Ok(0), Ok(0)));
             let (w, h) = if turned { (h, w) } else { (w, h) };
             out.size = (w > 0 && h > 0).then_some((w, h));
+            out.turn = match (be32(b, m).unwrap_or(0) as i32, be32(b, m + 4).unwrap_or(0) as i32) {
+                (0, v) if v > 0 => 1,
+                (0, v) if v < 0 => 3,
+                (v, _) if v < 0 => 2,
+                _ => 0,
+            };
         }
         out.video_codec = t.stsd.body.get(12..16).map(|c| String::from_utf8_lossy(c).into_owned());
         let dts = t.s.dts();
         let m0 = t.edit.media_time.max(0);
         let empty = to_dur(t.edit.empty as i64, movie);
+        out.zero = to_dur(m0, t.timescale).saturating_sub(empty);
         let at = |i: usize| empty + to_dur(t.s.cts(i, dts[i]) - m0, t.timescale);
         // Frames before the edit's start are decoded, not shown.
         let mut frames: Vec<Duration> = (0..t.s.len()).filter(|&i| t.s.cts(i, dts[i]) >= m0).map(at).collect();
@@ -869,6 +882,9 @@ pub fn info<R: Read + Seek>(src: &mut R) -> Result<Info> {
         keys.dedup();
         out.frames = frames;
         out.keys = keys;
+    }
+    if let Some(t) = tracks.iter().find(|t| t.hdlr.body.get(8..12) == Some(b"soun")) {
+        out.audio_zero = to_dur(t.edit.media_time.max(0), t.timescale);
     }
     if out.duration.is_zero() {
         out.duration = out.frames.last().copied().unwrap_or_default();
@@ -1086,6 +1102,7 @@ mod tests {
             Command::new(&ff).args(["-v", "error", "-y", "-display_rotation", "90", "-i"]).arg(&src).args(["-c", "copy"]).arg(&rot).status().unwrap().success();
         if ok {
             assert_eq!(info_of(&rot).size, Some((240, 320)));
+            assert!(matches!(info_of(&rot).turn, 1 | 3));
             let rc = src.with_file_name("rot-cut.mp4");
             cut(&rot, &rc, 0.5, 2.5);
             assert_eq!(info_of(&rc).size, Some((240, 320)));

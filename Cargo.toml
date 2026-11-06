@@ -19,6 +19,7 @@ anyhow = "1"
 [target.'cfg(not(windows))'.dependencies]
 winit = "0.30"
 softbuffer = "0.4"
+cpal = "0.15"
 rfd = "0.15"
 
 [target.'cfg(windows)'.dependencies]
@@ -32,6 +33,8 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Gdi",
     "Win32_Media",
     "Win32_Media_Audio",
+    "Win32_Devices_FunctionDiscovery",
+    "Win32_UI_Shell_PropertiesSystem",
     "Win32_Media_MediaFoundation",
     "Win32_Security",
     "Win32_System_Com",
@@ -46,9 +49,6 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",
 ] }
-
-[dependencies.cpal]
-version = "0.15"
 
 # The UI font is baked at build time (build.rs): no font parser at run time.
 [build-dependencies]
