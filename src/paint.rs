@@ -469,7 +469,7 @@ pub fn png(w: u32, h: u32, bgra: &[u8]) -> Vec<u8> {
 mod tests {
     use super::*;
 
-    fn canvas<'a>(buf: &'a mut Vec<u8>, text: &'a mut Text, w: usize) -> Canvas<'a> {
+    fn canvas<'a>(buf: &'a mut [u8], text: &'a mut Text, w: usize) -> Canvas<'a> {
         Canvas { fb: Fb::with_origin(buf, w, 0, 0, crate::raster::Order::Bgra), text, s: 1.0, stage: hex(0, 255) }
     }
 

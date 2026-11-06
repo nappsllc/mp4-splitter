@@ -13,6 +13,7 @@ use crate::shell::{Button, CursorKind, Host, Key, Mods, Tick, Wake};
 use crate::split::{self, Marker, Plan};
 use crate::theme::{self, Theme};
 use crate::uifb::Fb;
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -23,6 +24,15 @@ pub struct Frame<'a> {
     pub h: u32,
     pub bgra: &'a [u8],
 }
+
+/// The bands of the window, top to bottom: what a paint can redo alone.
+const HEADER: u8 = 1;
+const PREVIEW: u8 = 2;
+const CONTROLS: u8 = 4;
+const TIMELINE: u8 = 8;
+const ALL: u8 = HEADER | PREVIEW | CONTROLS | TIMELINE;
+/// Hits of what floats over the bands (the toast): redone with any paint.
+const OVER: u8 = 16;
 
 /// What a file dialog came back with, waiting for the app's thread.
 enum Dialog {
@@ -143,6 +153,10 @@ pub struct App {
     quit: bool,
     /// The frame (BGRA), kept between paints.
     canvas: Vec<u8>,
+    /// The bands to draw again.
+    dirty: Cell<u8>,
+    /// The band being drawn: what its controls' hits belong to.
+    part: u8,
     text: Option<Text>,
     theme: Theme,
     l: Layout,
@@ -160,7 +174,7 @@ pub struct App {
     n: usize,
     mouse: (f32, f32),
     mods: Mods,
-    hits: Vec<(Rect, Act, &'static str)>,
+    hits: Vec<(Rect, Act, &'static str, u8)>,
     hover: Option<Act>,
     hover_since: Instant,
     pressed: Option<Act>,
@@ -188,6 +202,8 @@ impl App {
             dialog: Arc::default(),
             quit: false,
             canvas: Vec::new(),
+            dirty: Cell::new(ALL),
+            part: HEADER,
             text: Some(Text::new()),
             theme,
             l,
@@ -226,8 +242,32 @@ impl App {
         self.host.wake()
     }
 
+    /// Draw everything again.
     fn redraw(&self) {
+        self.dirty.set(ALL);
         self.host.redraw(None);
+    }
+
+    /// The rows of a band.
+    fn rows(&self, part: u8) -> (u32, u32) {
+        let l = &self.l;
+        let (a, b) = match part {
+            HEADER => (0.0, l.header.bottom()),
+            PREVIEW => (l.header.bottom(), l.controls.y),
+            CONTROLS => (l.controls.y, l.tools.y),
+            _ => (l.tools.y, l.h),
+        };
+        (a.round().max(0.0) as u32, (b.round().max(0.0) as u32).min(l.h as u32))
+    }
+
+    /// Draw these bands again.
+    fn redraw_parts(&self, parts: u8) {
+        self.dirty.set(self.dirty.get() | parts);
+        for part in [HEADER, PREVIEW, CONTROLS, TIMELINE] {
+            if parts & part != 0 {
+                self.host.redraw(Some(self.rows(part)));
+            }
+        }
     }
 
     fn say(&mut self, text: impl Into<String>, error: bool, reveal: Option<PathBuf>) {
@@ -426,7 +466,7 @@ impl App {
         } else {
             self.request_still();
         }
-        self.redraw();
+        self.redraw_parts(CONTROLS | TIMELINE);
     }
 
     fn step_frame(&mut self, dir: i32) {
@@ -845,13 +885,28 @@ impl App {
         let s = self.host.scale();
         self.l = layout(w as f32, h as f32, s);
         let mut canvas = std::mem::take(&mut self.canvas);
-        canvas.resize(w as usize * h as usize * 4, 0);
+        let size = w as usize * h as usize * 4;
+        if canvas.len() != size {
+            canvas.resize(size, 0);
+            self.dirty.set(ALL);
+        }
         let mut text = self.text.take().unwrap_or_else(Text::new);
-        self.hits.clear();
-        {
-            let fb = Fb::with_origin(&mut canvas, w as usize, 0, 0, Order::Bgra);
+        let dirty = self.dirty.replace(0);
+        self.hits.retain(|hit| hit.3 & dirty == 0 && hit.3 != OVER);
+        // Everything at once, or band by band (each on its own rows: what
+        // floats over them is cut to what is drawn).
+        let whole = [(ALL, 0, h)];
+        let bands: Vec<(u8, u32, u32)> = if dirty == ALL {
+            whole.to_vec()
+        } else {
+            [HEADER, PREVIEW, CONTROLS, TIMELINE].iter().filter(|p| dirty & **p != 0).map(|&p| (p, self.rows(p).0, self.rows(p).1)).collect()
+        };
+        for (part, y0, y1) in bands {
+            let row = w as usize * 4;
+            let Some(pixels) = canvas.get_mut(y0 as usize * row..y1 as usize * row) else { continue };
+            let fb = Fb::with_origin(pixels, w as usize, 0, y0 as i32, Order::Bgra);
             let mut c = Canvas { fb, text: &mut text, s, stage: self.theme.stage };
-            self.draw(&mut c);
+            self.draw(&mut c, part);
         }
         self.canvas = canvas;
         self.text = Some(text);
@@ -933,33 +988,49 @@ impl App {
             }
             (None, None) => {}
         }
-        self.hits.push((r, act, tip));
+        self.hits.push((r, act, tip, self.part));
     }
 
     fn hit_hover(&self, r: Rect) -> bool {
         r.contains(self.mouse.0, self.mouse.1) && self.drag.is_none()
     }
 
-    fn draw(&mut self, c: &mut Canvas) {
+    fn draw(&mut self, c: &mut Canvas, part: u8) {
         let t = self.theme;
         let l = self.l;
         let s = l.s;
         c.clear(t.bg);
-        self.draw_header(c);
-        // The stage.
-        c.rrect(l.preview, 12.0 * s, t.stage);
-        self.draw_preview(c);
-        if self.doc.is_some() {
-            self.draw_controls(c);
-            self.draw_tools(c);
+        if part & HEADER != 0 {
+            self.part = HEADER;
+            self.draw_header(c);
         }
-        c.shadow(l.card, 12.0 * s);
-        c.rrect(l.card, 12.0 * s, t.surface);
-        c.rrect_stroke(l.card, 12.0 * s, 1.0 * s, t.border);
-        self.draw_timeline(c);
-        let hint = "Space play · ← → frame · Shift 1 s · ↑ ↓ cuts · I / O start / end · S cut · Del remove · 2–9 split · wheel zoom";
-        let hint = if c.text.measure(hint, 12.0 * s) > l.hint.w { "Space play · ← → frame · I / O start / end · S cut · 2–9 split" } else { hint };
-        c.text(l.hint.cx(), l.hint.cy() + 4.0 * s, 12.0 * s, t.text_faint, hint, Align::Center);
+        if part & PREVIEW != 0 {
+            self.part = PREVIEW;
+            // The stage.
+            c.rrect(l.preview, 12.0 * s, t.stage);
+            self.draw_preview(c);
+        }
+        if self.doc.is_some() {
+            if part & CONTROLS != 0 {
+                self.part = CONTROLS;
+                self.draw_controls(c);
+            }
+            if part & TIMELINE != 0 {
+                self.part = TIMELINE;
+                self.draw_tools(c);
+            }
+        }
+        if part & TIMELINE != 0 {
+            self.part = TIMELINE;
+            c.shadow(l.card, 12.0 * s);
+            c.rrect(l.card, 12.0 * s, t.surface);
+            c.rrect_stroke(l.card, 12.0 * s, 1.0 * s, t.border);
+            self.draw_timeline(c);
+            let hint = "Space play · ← → frame · Shift 1 s · ↑ ↓ cuts · I / O start / end · S cut · Del remove · 2–9 split · wheel zoom";
+            let hint =
+                if c.text.measure(hint, 12.0 * s) > l.hint.w { "Space play · ← → frame · I / O start / end · S cut · 2–9 split" } else { hint };
+            c.text(l.hint.cx(), l.hint.cy() + 4.0 * s, 12.0 * s, t.text_faint, hint, Align::Center);
+        }
         self.draw_toast(c);
         self.draw_tooltip(c);
         if self.drop_hover {
@@ -1463,7 +1534,7 @@ impl App {
                 c.line(tx - 1.0 * s, pr.cy(), tx + tw + 1.0 * s, pr.cy(), 1.0 * s, t.text_muted);
             }
             if !one {
-                self.hits.push((pr, Act::Piece(i), if on { "Leave this piece out (Delete at the playhead)" } else { "Put this piece back" }));
+                self.hits.push((pr, Act::Piece(i), if on { "Leave this piece out (Delete at the playhead)" } else { "Put this piece back" }, self.part));
             }
         }
         // Where the pointer is.
@@ -1536,7 +1607,7 @@ impl App {
             c.rrect(br, 7.0 * s, if hover { t.accent_hover } else { t.accent });
             c.icon(Icon::Folder, Rect::new(br.x + 10.0 * s, br.cy() - 8.0 * s, 16.0 * s, 16.0 * s), t.on_accent);
             c.text(br.x + 32.0 * s, br.cy() + 4.5 * s, px, t.on_accent, "Show folder", Align::Left);
-            self.hits.push((br, Act::ShowFolder, ""));
+            self.hits.push((br, Act::ShowFolder, "", OVER));
             x += bw + 4.0 * s;
         }
         let cr = Rect::new(x, r.cy() - 13.0 * s, 26.0 * s, 26.0 * s);
@@ -1544,7 +1615,7 @@ impl App {
             c.rrect(cr, 7.0 * s, crate::paint::hex(0xFFFFFF, 20));
         }
         c.icon(Icon::Close, cr.inset(6.0 * s, 6.0 * s), t.tooltip_text.with_alpha(180));
-        self.hits.push((cr, Act::CloseToast, ""));
+        self.hits.push((cr, Act::CloseToast, "", OVER));
     }
 
     fn draw_tooltip(&mut self, c: &mut Canvas) {
@@ -1554,7 +1625,7 @@ impl App {
             return;
         }
         let (mx, my) = self.mouse;
-        let Some((r, _, tip)) = self.hits.iter().rev().find(|h| h.0.contains(mx, my)).cloned() else { return };
+        let Some((r, _, tip, _)) = self.hits.iter().rev().find(|h| h.0.contains(mx, my)).cloned() else { return };
         if tip.is_empty() {
             return;
         }
@@ -1673,6 +1744,7 @@ impl App {
             if let Some((seq, t, p)) = got {
                 if seq == d.last_still && self.playing.is_none() {
                     d.frame = Some((t, p));
+                    self.redraw_parts(PREVIEW);
                 }
             }
         }
@@ -1682,8 +1754,14 @@ impl App {
             Some(Dialog::ExportTo(Some(dir))) => self.export_to(dir),
             _ => {}
         }
-        self.check_export();
-        self.redraw();
+        if self.exporting.is_some() {
+            self.check_export();
+            self.redraw_parts(HEADER);
+        }
+        // Thumbnails and the waveform come in here too; playing, the tick draws them.
+        if self.playing.is_none() {
+            self.redraw_parts(TIMELINE);
+        }
     }
 
     /// The window's size or scale changed.
@@ -1720,7 +1798,12 @@ impl App {
             self.drag_to(x);
         }
         self.host.set_cursor(self.cursor());
-        self.redraw();
+        // What a pointer changes: a control's look, or the timeline's hover line.
+        if now != before || self.doc.is_none() {
+            self.redraw();
+        } else if self.l.card.contains(x, y) || self.drag.is_some() {
+            self.redraw_parts(TIMELINE);
+        }
     }
 
     /// The pointer left the window.
@@ -1797,7 +1880,7 @@ impl App {
                 fresh = true;
             }
             if fresh {
-                self.redraw();
+                self.redraw_parts(PREVIEW);
             }
             if now >= dur {
                 self.playhead = dur;
@@ -1813,7 +1896,7 @@ impl App {
                     }
                 }
                 if self.last_paint.elapsed() > Duration::from_millis(33) {
-                    self.redraw();
+                    self.redraw_parts(CONTROLS | TIMELINE);
                 }
                 earliest(&mut wait, Instant::now() + Duration::from_millis(5));
             }

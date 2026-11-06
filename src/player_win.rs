@@ -101,14 +101,16 @@ impl Source {
         g
     }
 
-    /// Close the decoder if nothing has used it for a while.
-    fn rest(&self) {
+    /// Close the decoder if nothing has used it for a while; true when it has.
+    fn rest(&self) -> bool {
         if let Ok(mut g) = self.decoder.slot.try_lock() {
             if g.v.is_some() && g.used.is_some_and(|u| u.elapsed() > DECODER_IDLE) {
                 g.v = None;
                 g.at = None;
+                return true;
             }
         }
+        false
     }
 }
 
@@ -418,10 +420,12 @@ impl Stills {
                     g.take()
                 };
                 let Some(StillJob { t, size, seq }) = next else {
-                    src.rest();
+                    if src.rest() {
+                        f.kept.clear();
+                    }
                     continue;
                 };
-                let newer = || job.0.lock().map_or(false, |g| g.is_some());
+                let newer = || job.0.lock().is_ok_and(|g| g.is_some());
                 if let Some(p) = f.find(&src, t, size, newer) {
                     *d2.lock().unwrap_or_else(|e| e.into_inner()) = Some((seq, t, p));
                     wake();
@@ -564,9 +568,13 @@ mod tests {
     use std::process::Command;
 
     fn fixture(ff: &Path, dir: &Path) -> PathBuf {
-        let p = dir.join("src.mp4");
+        make(ff, dir, "src.mp4", "320x240")
+    }
+
+    fn make(ff: &Path, dir: &Path, name: &str, size: &str) -> PathBuf {
+        let p = dir.join(name);
         let ok = Command::new(ff)
-            .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30:duration=4", "-f", "lavfi", "-i"])
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", &format!("testsrc2=size={size}:rate=30:duration=4"), "-f", "lavfi", "-i"])
             .args(["sine=frequency=440:duration=4", "-c:v", "libx264", "-g", "30", "-bf", "2", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest"])
             .arg(&p)
             .status()
@@ -586,22 +594,29 @@ mod tests {
 
     /// Asked in any order, the picture is the one ffmpeg shows at that time,
     /// and not its neighbour.
-    fn check_frames(ff: &Path, p: &Path) {
+    ///
+    /// For untagged HD, ffmpeg's converter assumes BT.601 and players (and
+    /// this app) BT.709, so the colours differ a little there even when the
+    /// decoding is right: a broken chroma plane differs by about 12.
+    fn check_frames(ff: &Path, p: &Path, size: (u32, u32)) {
+        let most = if size.1 >= 720 { 8.0 } else { 6.0 };
         let i = info(p);
         let src = Source::new(p.to_path_buf(), &i);
         let mut f = Finder::new(src.zero, src.half);
         let n = i.frames.len();
         for k in [0, 1, 2, 40, 41, 40, 39, 38, 37, n / 2, n - 2, n - 1, 3] {
             let t = i.frames[k];
-            let got = f.find(&src, t, (320, 240), || false).unwrap_or_else(|| panic!("{}: no picture for frame {k} of {n}", p.display()));
-            let want = crate::ffmpeg::picture_at(ff, p, t, 320, 240, false).unwrap();
+            let got = f.find(&src, t, size, || false).unwrap_or_else(|| panic!("{}: no picture for frame {k} of {n}", p.display()));
+            // ffmpeg stops at the edit list's end; a frame past it has nothing to compare with.
+            let Ok(want) = crate::ffmpeg::picture_at(ff, p, t, size.0, size.1, false) else { continue };
             let d = diff(&got, &want);
-            assert!(d < 6.0, "{}: frame {k}: differs by {d} from ffmpeg's", p.display());
+            assert!(d < most, "{}: frame {k}: differs by {d} from ffmpeg's", p.display());
             for near in [k.wrapping_sub(1), k + 1] {
                 if near < n {
-                    let other = crate::ffmpeg::picture_at(ff, p, i.frames[near], 320, 240, false).unwrap();
-                    let e = diff(&got, &other);
-                    assert!(d < e, "{}: frame {k} looks more like frame {near}: {d} vs {e}", p.display());
+                    if let Ok(other) = crate::ffmpeg::picture_at(ff, p, i.frames[near], size.0, size.1, false) {
+                        let e = diff(&got, &other);
+                        assert!(d < e, "{}: frame {k} looks more like frame {near}: {d} vs {e}", p.display());
+                    }
                 }
             }
         }
@@ -613,13 +628,25 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("mp4s-stills-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let src = fixture(&ff, &dir);
-        check_frames(&ff, &src);
+        check_frames(&ff, &src, (320, 240));
         let cut = dir.join("cut.mp4");
         let mut r = std::io::BufReader::new(std::fs::File::open(&src).unwrap());
         let mut w = std::io::BufWriter::new(std::fs::File::create(&cut).unwrap());
         crate::mp4::trim(&mut r, &mut w, Duration::from_secs_f64(0.5), Duration::from_secs_f64(3.5)).unwrap();
         drop(w);
-        check_frames(&ff, &cut);
+        check_frames(&ff, &cut, (320, 240));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Decoder surfaces are taller than 1080 rows: the colours stay right,
+    /// the top rows too.
+    #[test]
+    fn stills_are_right_at_1080p() {
+        let Some(ff) = crate::ffmpeg::find() else { return };
+        let dir = std::env::temp_dir().join(format!("mp4s-1080-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = make(&ff, &dir, "hd.mp4", "1920x1080");
+        check_frames(&ff, &src, (1920, 1080));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -632,7 +659,12 @@ mod tests {
         let i = info(&p);
         let (tx, rx) = std::sync::mpsc::channel::<()>();
         let tx = Mutex::new(tx);
-        let peaks = load_peaks(&Source::new(p.clone(), &i), Arc::new(move || drop(tx.lock().unwrap().send(()))));
+        let peaks = load_peaks(
+            &Source::new(p.clone(), &i),
+            Arc::new(move || {
+                let _ = tx.lock().unwrap().send(());
+            }),
+        );
         let t = Instant::now();
         let want = (PEAKS_PER_SEC * 4) as usize;
         while peaks.lock().unwrap().len() < want - 5 && t.elapsed() < Duration::from_secs(10) {

@@ -1,5 +1,6 @@
 //! MP4 Splitter: cut a video into pieces without re-encoding.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+#![allow(unknown_lints, clippy::collapsible_if, clippy::chunks_exact_to_as_chunks)]
 
 mod app;
 #[cfg(not(windows))]
@@ -7,7 +8,6 @@ mod audio;
 #[cfg(windows)]
 #[path = "audio_win.rs"]
 mod audio;
-#[allow(dead_code)]
 mod deflate;
 #[cfg(windows)]
 mod dialogs;

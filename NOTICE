@@ -4,13 +4,18 @@ This product includes software developed at PowerNapps
 (https://github.com/nappsllc/mp4-splitter), licensed under the Apache License,
 Version 2.0 (see LICENSE).
 
-The lossless MP4 cutting code (src/mp4.rs) is adapted from Rustshot
-(https://github.com/nappsllc/rustshot, src/rec/cut/mp4.rs), Copyright 2026
-PowerNapps, licensed under the Apache License, Version 2.0, as is the code that
-embeds the icon and version info (build.rs, from Rustshot's build.rs).
+These are adapted from Rustshot (https://github.com/nappsllc/rustshot),
+Copyright 2026 PowerNapps, licensed under the Apache License, Version 2.0:
+  src/mp4.rs (from src/rec/cut/mp4.rs); build.rs (from build.rs);
+  src/deflate.rs, src/raster.rs, src/uifb.rs, src/fonts.rs (from the same files);
+  src/objects.rs (from src/objects); src/shell_win.rs (from src/wind_win.rs);
+  src/dialogs.rs (from src/ui/folder_dialog.rs);
+  src/mf.rs and src/player_win.rs (from src/rec/win/mf.rs and src/rec/cut/decode.rs);
+  src/audio_win.rs (from src/rec/win/wasapi.rs).
 
 It also includes the Inter font (assets/fonts/Inter-Medium.subset.ttf),
 Copyright 2016 The Inter Project Authors, under the SIL Open Font License 1.1
 (assets/fonts/OFL.txt), and Rust crates under their own licenses (MIT,
-Apache-2.0, BSD or zlib; see Cargo.lock). Pictures and sound are decoded by
-ffmpeg, which is run as a separate program and is not part of this product.
+Apache-2.0, BSD or zlib; see Cargo.lock). On macOS and Linux, pictures and sound
+are decoded by ffmpeg, which is run as a separate program and is not part of this
+product.

@@ -3,7 +3,6 @@
 // (adapted from Rustshot's build.rs, Apache-2.0). A missing rc.exe never fails
 // the build: it just means no icon.
 #[path = "src/deflate.rs"]
-#[allow(dead_code)]
 mod deflate;
 
 use std::path::{Path, PathBuf};

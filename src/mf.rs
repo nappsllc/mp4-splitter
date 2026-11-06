@@ -97,57 +97,53 @@ fn new_type() -> Result<IMFMediaType> {
     unsafe { make(|p| (a.create_media_type)(p)) }
 }
 
-/// A DXGI device manager on the default adapter's D3D11 device: the hardware
-/// decoders' way to the GPU. `None`: decode in software.
-fn gpu() -> Option<IMFDXGIDeviceManager> {
-    static GPU: OnceLock<Option<Shared>> = OnceLock::new();
-    struct Shared(IMFDXGIDeviceManager, #[allow(dead_code)] ID3D11Device);
-    // SAFETY: both are free-threaded (the device is made multithread-protected below).
-    unsafe impl Send for Shared {}
-    unsafe impl Sync for Shared {}
-    GPU.get_or_init(|| {
-        let a = api().ok()?;
-        // SAFETY: as Direct3D and Media Foundation document.
-        unsafe {
-            let mut device = None;
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                HMODULE::default(),
-                D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                Some(&[D3D_FEATURE_LEVEL_11_0]),
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                None,
-            )
-            .ok()?;
-            let device = device?;
-            let protect: windows::Win32::Graphics::Direct3D11::ID3D11Multithread = device.cast().ok()?;
-            let _ = protect.SetMultithreadProtected(true);
-            let mut token = 0u32;
-            let m: IMFDXGIDeviceManager = make(|p| (a.create_manager)(&mut token, p)).ok()?;
-            m.ResetDevice(&device, token).ok()?;
-            Some(Shared(m, device))
-        }
-    })
-    .as_ref()
-    .map(|s| s.0.clone())
+/// The GPU a reader decodes on: a D3D11 device and its DXGI manager, which
+/// the reader needs for as long as it lives. It goes with the reader, so an
+/// idle app holds no decoding memory.
+struct Gpu {
+    manager: IMFDXGIDeviceManager,
+    _device: ID3D11Device,
+}
+
+/// The default adapter's device. `None`: decode in software.
+fn gpu() -> Option<Gpu> {
+    let a = api().ok()?;
+    // SAFETY: as Direct3D and Media Foundation document.
+    unsafe {
+        let mut device = None;
+        D3D11CreateDevice(
+            None,
+            D3D_DRIVER_TYPE_HARDWARE,
+            HMODULE::default(),
+            D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            Some(&[D3D_FEATURE_LEVEL_11_0]),
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            None,
+        )
+        .ok()?;
+        let device = device?;
+        let protect: windows::Win32::Graphics::Direct3D11::ID3D11Multithread = device.cast().ok()?;
+        let _ = protect.SetMultithreadProtected(true);
+        let mut token = 0u32;
+        let manager: IMFDXGIDeviceManager = make(|p| (a.create_manager)(&mut token, p)).ok()?;
+        manager.ResetDevice(&device, token).ok()?;
+        Some(Gpu { manager, _device: device })
+    }
 }
 
 /// A source reader on `path`.
-fn reader(path: &Path, hardware: bool) -> Result<IMFSourceReader> {
+fn reader(path: &Path, gpu: Option<&Gpu>) -> Result<IMFSourceReader> {
     com_init();
     let a = api()?;
     let url: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     // SAFETY: as Media Foundation documents; `url` outlives the call.
     unsafe {
         let attrs: IMFAttributes = make(|p| (a.create_attributes)(p, 4))?;
-        if hardware {
-            if let Some(m) = gpu() {
-                attrs.SetUnknown(&MF_SOURCE_READER_D3D_MANAGER, &m.cast::<IUnknown>()?)?;
-                attrs.SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1)?;
-            }
+        if let Some(g) = gpu {
+            attrs.SetUnknown(&MF_SOURCE_READER_D3D_MANAGER, &g.manager.cast::<IUnknown>()?)?;
+            attrs.SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1)?;
         }
         make(|p| (a.create_reader)(PCWSTR(url.as_ptr()), attrs.as_raw(), p)).context("open the file")
     }
@@ -222,6 +218,7 @@ impl Yuv {
 /// `sw` * `sh` of an NV12 buffer scaled to `w` * `h` BGRA: a 2 x 2 average of
 /// the luma when it shrinks, the nearest chroma. (Not a sharper filter: this
 /// runs for every frame played, on the CPU, in a size-optimised build.)
+#[allow(clippy::too_many_arguments)]
 fn nv12_to_bgra(nv: &[u8], pitch: usize, rows: usize, sw: usize, sh: usize, w: usize, h: usize, yuv: Yuv) -> Option<Vec<u8>> {
     let uv0 = pitch * rows;
     if w == 0 || h == 0 || sw == 0 || sh == 0 || nv.len() < uv0 + pitch * sh.div_ceil(2) {
@@ -262,7 +259,7 @@ fn nv12_to_bgra(nv: &[u8], pitch: usize, rows: usize, sw: usize, sh: usize, w: u
 
 /// `p` turned clockwise by `quarters` right angles.
 fn turned(src: Vec<u8>, w: usize, h: usize, quarters: u8) -> Vec<u8> {
-    if quarters % 4 == 0 {
+    if quarters.is_multiple_of(4) {
         return src;
     }
     let mut out = vec![0u8; src.len()];
@@ -298,6 +295,7 @@ pub struct VideoReader {
     yuv: Yuv,
     /// Quarter turns clockwise to show it upright.
     turn: u8,
+    _gpu: Option<Gpu>,
 }
 
 // SAFETY: Media Foundation's objects are free-threaded; used by one thread at a time.
@@ -305,7 +303,9 @@ unsafe impl Send for VideoReader {}
 
 impl VideoReader {
     pub fn open(path: &Path, hardware: bool, turn: u8) -> Result<VideoReader> {
-        let r = reader(path, hardware)?;
+        com_init();
+        let gpu = if hardware { gpu() } else { None };
+        let r = reader(path, gpu.as_ref())?;
         // SAFETY: as Media Foundation documents.
         unsafe {
             let _ = r.SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS.0 as u32, false);
@@ -329,7 +329,7 @@ impl VideoReader {
             let range = cur.GetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE).unwrap_or(0);
             let bt709 = if matrix == MFVideoTransferMatrix_BT601.0 as u32 { false } else { matrix == MFVideoTransferMatrix_BT709.0 as u32 || shown.1 >= 720 };
             let yuv = Yuv::of(bt709, range == MFNominalRange_0_255.0 as u32);
-            Ok(VideoReader { r, coded, shown, stride, yuv, turn })
+            Ok(VideoReader { r, coded, shown, stride, yuv, turn, _gpu: gpu })
         }
     }
 
@@ -352,9 +352,12 @@ impl VideoReader {
             let buf = d.sample.GetBufferByIndex(0).ok()?;
             if let Ok(b2) = buf.cast::<IMF2DBuffer>() {
                 let (mut data, mut pitch) = (std::ptr::null_mut(), 0i32);
+                let total = b2.GetContiguousLength().ok()? as usize;
                 b2.Lock2D(&mut data, &mut pitch).ok()?;
                 let pitch = pitch.unsigned_abs() as usize;
-                let rows = self.coded.1 as usize;
+                // The decoder's surfaces can be taller than the picture (1088
+                // rows for 1080): the chroma starts after all of them.
+                let rows = (total * 2 / 3 / pitch.max(1)).max(self.coded.1 as usize);
                 let nv = std::slice::from_raw_parts(data, pitch * rows + pitch * rows.div_ceil(2));
                 let out = nv12_to_bgra(nv, pitch, rows, self.shown.0 as usize, self.shown.1 as usize, rw, rh, self.yuv);
                 let _ = b2.Unlock2D();
@@ -384,7 +387,7 @@ unsafe impl Send for AudioReader {}
 
 impl AudioReader {
     pub fn open(path: &Path) -> Result<AudioReader> {
-        let r = reader(path, false)?;
+        let r = reader(path, None)?;
         // SAFETY: as Media Foundation documents.
         unsafe {
             let _ = r.SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS.0 as u32, false);

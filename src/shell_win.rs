@@ -8,11 +8,12 @@ use crate::app::App;
 use crate::shell::{Button, CursorKind, Host, Key, Mods, Picked, Wake};
 use crate::theme::Theme;
 use anyhow::{Result, anyhow};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, POINTL, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
     DwmSetWindowAttribute,
@@ -21,19 +22,28 @@ use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, DIB_RGB_COLORS, EndPaint, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO,
     MonitorFromPoint, PAINTSTRUCT, SetDIBitsToDevice, UpdateWindow,
 };
+use windows::Win32::System::Com::{DVASPECT_CONTENT, FORMATETC, IDataObject, TYMED_HGLOBAL};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Ole::{
+    CF_HDROP, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE, IDropTarget, IDropTarget_Impl, OleInitialize, RegisterDragDrop, ReleaseStgMedium, RevokeDragDrop,
+};
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
+use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
 use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, SetThreadDpiAwarenessContext};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_CONTROL, VK_LWIN, VK_RWIN, VK_SHIFT,
 };
-use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
+use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{PCWSTR, w};
+use windows::core::{PCWSTR, Ref, implement, w};
 
 const CLASS: PCWSTR = w!("mp4_splitter_window");
 /// Something finished on another thread.
 const WM_WAKE: u32 = WM_APP + 1;
+/// A file is dragged over the window (wParam 1), or no longer (0).
+const WM_HOVER_FILE: u32 = WM_APP + 2;
+/// A file was dropped: its path is in [`State::dropped`].
+const WM_DROPPED: u32 = WM_APP + 3;
 /// The ticking timer while Windows runs its own loop (a move or resize).
 const TIMER_SIZING: usize = 1;
 const SIZING_MS: u32 = 16;
@@ -151,9 +161,68 @@ impl Host for Win32Host {
     }
 }
 
+/// The first file in a drag, if it has one.
+fn dragged_file(data: &IDataObject) -> Option<PathBuf> {
+    let fmt = FORMATETC { cfFormat: CF_HDROP.0, ptd: std::ptr::null_mut(), dwAspect: DVASPECT_CONTENT.0, lindex: -1, tymed: TYMED_HGLOBAL.0 as u32 };
+    // SAFETY: the medium is released after its files are read; `buf` outlives the call.
+    unsafe {
+        let mut medium = data.GetData(&fmt).ok()?;
+        let mut buf = [0u16; 4096];
+        let n = DragQueryFileW(HDROP(medium.u.hGlobal.0), 0, Some(&mut buf)) as usize;
+        ReleaseStgMedium(&mut medium);
+        (n > 0).then(|| PathBuf::from(String::from_utf16_lossy(&buf[..n])))
+    }
+}
+
+/// Files dragged over the window: a highlight, and opening what is dropped.
+#[implement(IDropTarget)]
+struct DropTarget {
+    hwnd: Post,
+    dropped: Rc<RefCell<Option<PathBuf>>>,
+}
+
+impl DropTarget {
+    fn post(&self, msg: u32, on: bool) {
+        // SAFETY: posting to a window that is gone just fails.
+        let _ = unsafe { PostMessageW(Some(self.hwnd.hwnd()), msg, WPARAM(usize::from(on)), LPARAM(0)) };
+    }
+}
+
+impl IDropTarget_Impl for DropTarget_Impl {
+    fn DragEnter(&self, data: Ref<IDataObject>, _: MODIFIERKEYS_FLAGS, _: &POINTL, effect: *mut DROPEFFECT) -> windows::core::Result<()> {
+        let has = data.as_ref().and_then(dragged_file).is_some();
+        // SAFETY: OLE gives a valid out-parameter.
+        unsafe { *effect = if has { DROPEFFECT_COPY } else { DROPEFFECT_NONE } };
+        self.post(WM_HOVER_FILE, has);
+        Ok(())
+    }
+
+    fn DragOver(&self, _: MODIFIERKEYS_FLAGS, _: &POINTL, effect: *mut DROPEFFECT) -> windows::core::Result<()> {
+        // SAFETY: OLE gives a valid out-parameter; what DragEnter said stands.
+        unsafe { *effect = if *effect == DROPEFFECT_NONE { DROPEFFECT_NONE } else { DROPEFFECT_COPY } };
+        Ok(())
+    }
+
+    fn DragLeave(&self) -> windows::core::Result<()> {
+        self.post(WM_HOVER_FILE, false);
+        Ok(())
+    }
+
+    fn Drop(&self, data: Ref<IDataObject>, _: MODIFIERKEYS_FLAGS, _: &POINTL, effect: *mut DROPEFFECT) -> windows::core::Result<()> {
+        let file = data.as_ref().and_then(dragged_file);
+        // SAFETY: OLE gives a valid out-parameter.
+        unsafe { *effect = if file.is_some() { DROPEFFECT_COPY } else { DROPEFFECT_NONE } };
+        *self.dropped.borrow_mut() = file;
+        self.post(WM_DROPPED, true);
+        Ok(())
+    }
+}
+
 /// What the window procedure reaches.
 struct State {
     app: Option<App>,
+    /// What the drop target got, for the window procedure to hand on.
+    dropped: Rc<RefCell<Option<PathBuf>>>,
     /// Inside a call to the app (a message sent meanwhile must not reach it).
     busy: bool,
     tracking: bool,
@@ -244,14 +313,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 let hdc = BeginPaint(hwnd, &mut ps);
                 with_app(st, |a| {
                     let f = a.paint();
-                    let mut bmi = BITMAPINFO::default();
-                    bmi.bmiHeader = BITMAPINFOHEADER {
-                        biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                        biWidth: f.w as i32,
-                        biHeight: -(f.h as i32),
-                        biPlanes: 1,
-                        biBitCount: 32,
-                        biCompression: BI_RGB.0,
+                    let bmi = BITMAPINFO {
+                        bmiHeader: BITMAPINFOHEADER {
+                            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                            biWidth: f.w as i32,
+                            biHeight: -(f.h as i32),
+                            biPlanes: 1,
+                            biBitCount: 32,
+                            biCompression: BI_RGB.0,
+                            ..Default::default()
+                        },
                         ..Default::default()
                     };
                     // The dirty rectangle only (DIB rows are counted from the bottom).
@@ -354,15 +425,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 // The app sets it as the pointer moves; keep it from the class's.
                 LRESULT(1)
             }
-            WM_DROPFILES => {
-                let drop = HDROP(wp.0 as *mut _);
-                let mut buf = [0u16; 4096];
-                let n = DragQueryFileW(drop, 0, Some(&mut buf)) as usize;
-                DragFinish(drop);
-                if n > 0 {
-                    let p = PathBuf::from(String::from_utf16_lossy(&buf[..n]));
-                    with_app(st, |a| a.on_drop(&p));
-                }
+            WM_HOVER_FILE => {
+                with_app(st, |a| a.on_hover_file(wp.0 != 0));
+                LRESULT(0)
+            }
+            WM_DROPPED => {
+                let file = (*st).dropped.borrow_mut().take();
+                with_app(st, |a| match &file {
+                    Some(p) => a.on_drop(p),
+                    None => a.on_hover_file(false),
+                });
                 LRESULT(0)
             }
             WM_WAKE => {
@@ -437,11 +509,15 @@ pub fn run(open: Option<PathBuf>) -> Result<()> {
         let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), CLASS, w!("MP4 Splitter"), style, x, y, ow, oh, None, None, Some(inst), None)?;
         let round = DWMWCP_ROUND;
         let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, (&raw const round).cast(), 4);
-        DragAcceptFiles(hwnd, true);
+        // COM for the drop target (a failure here costs only drag and drop).
+        let _ = OleInitialize(None);
+        let dropped = Rc::new(RefCell::new(None));
+        let target: IDropTarget = DropTarget { hwnd: Post(hwnd.0 as isize), dropped: dropped.clone() }.into();
+        let _ = RegisterDragDrop(hwnd, &target);
         let host = Win32Host { hwnd, cursor: Cell::new(CursorKind::Default) };
         // Themed before it is first shown: no white title bar flash.
         let app = App::new(Box::new(host), os_dark(), open);
-        let mut st = State { app: Some(app), busy: false, tracking: false };
+        let mut st = State { app: Some(app), dropped, busy: false, tracking: false };
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, (&raw mut st) as isize);
         let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
         let _ = SetForegroundWindow(hwnd);
@@ -463,6 +539,7 @@ pub fn run(open: Option<PathBuf>) -> Result<()> {
             MsgWaitForMultipleObjectsEx(None, timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
         }
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        let _ = RevokeDragDrop(hwnd);
         drop(st);
         Ok(())
     }
