@@ -116,8 +116,6 @@ pub struct Canvas<'a> {
     pub text: &'a mut Text,
     /// Physical pixels a logical one.
     pub s: f32,
-    /// What rounded pictures sit on.
-    pub stage: C,
 }
 
 impl Canvas<'_> {
@@ -178,6 +176,8 @@ impl Canvas<'_> {
         let (bx0, by0, bx1, by1) = self.fb.bounds();
         let (cx0, cy0) = ((r.x.round() as i32).max(bx0), (r.y.round() as i32).max(by0));
         let (cx1, cy1) = ((r.right().round() as i32).min(bx1), (r.bottom().round() as i32).min(by1));
+        // What is behind the rounded corners, to blend them with.
+        let behind = if rad > 0.0 { self.corners(r, rad) } else { Vec::new() };
         let (sw, sh) = (img.w as usize, img.h as usize);
         if cx1 <= cx0 || cy1 <= cy0 || sw == 0 || sh == 0 || dst.w <= 0.0 || dst.h <= 0.0 || img.bgra.len() < sw * sh * 4 {
             return;
@@ -218,18 +218,26 @@ impl Canvas<'_> {
                 o[3] = 255;
             }
         }
-        if rad > 0.0 {
-            self.round_corners(r, rad);
+        // The corners, anti-aliased against what was there.
+        for (x, y, cov, old) in behind {
+            let i = (y - fy0) as usize * stride + (x - fx0) as usize;
+            if let Some(p) = self.fb.d.get_mut(i * 4..i * 4 + 4) {
+                for (v, o) in p.iter_mut().zip(old) {
+                    *v = (*v as f32 * (1.0 - cov) + o as f32 * cov).round() as u8;
+                }
+            }
         }
     }
 
-    /// Put back, in `r`'s corners, what a rounded picture does not cover:
-    /// the stage behind it (the corner pixels are only ever drawn over it).
-    fn round_corners(&mut self, r: Rect, rad: f32) {
-        let stage = self.stage;
+    /// The pixels of `r`'s corners outside a radius of `rad`, inside the
+    /// frame: where, how much of them stays as it is (0..=1), and what is
+    /// there now.
+    fn corners(&self, r: Rect, rad: f32) -> Vec<(i32, i32, f32, [u8; 4])> {
         let (x0, y0) = (r.x.round() as i32, r.y.round() as i32);
         let (x1, y1) = (r.right().round() as i32, r.bottom().round() as i32);
+        let (bx0, by0, bx1, by1) = self.fb.bounds();
         let n = rad.ceil() as i32;
+        let mut out = Vec::new();
         for j in 0..n {
             for i in 0..n {
                 let (dx, dy) = (rad - (i as f32 + 0.5), rad - (j as f32 + 0.5));
@@ -237,12 +245,17 @@ impl Canvas<'_> {
                 if cov <= 0.0 {
                     continue;
                 }
-                let col = stage.c4().fade(cov);
                 for (x, y) in [(x0 + i, y0 + j), (x1 - 1 - i, y0 + j), (x0 + i, y1 - 1 - j), (x1 - 1 - i, y1 - 1 - j)] {
-                    self.fb.blend_px(x, y, col);
+                    if x >= bx0 && x < bx1 && y >= by0 && y < by1 {
+                        let k = ((y - self.fb.oy) as usize * self.fb.stride + (x - self.fb.ox) as usize) * 4;
+                        if let Some(p) = self.fb.d.get(k..k + 4) {
+                            out.push((x, y, cov, [p[0], p[1], p[2], p[3]]));
+                        }
+                    }
                 }
             }
         }
+        out
     }
 
     /// Text with its baseline at `y`; its width.
@@ -481,7 +494,7 @@ mod tests {
     use super::*;
 
     fn canvas<'a>(buf: &'a mut [u8], text: &'a mut Text, w: usize) -> Canvas<'a> {
-        Canvas { fb: Fb::with_origin(buf, w, 0, 0, crate::raster::Order::Bgra), text, s: 1.0, stage: hex(0, 255) }
+        Canvas { fb: Fb::with_origin(buf, w, 0, 0, crate::raster::Order::Bgra), text, s: 1.0 }
     }
 
     #[test]
@@ -528,6 +541,28 @@ mod tests {
         canvas(&mut buf, &mut text, 8).image(&pic, Rect::new(2.0, 2.0, 4.0, 4.0), None);
         assert_eq!(&buf[(3 * 8 + 3) * 4..(3 * 8 + 3) * 4 + 4], &[9, 8, 7, 255]);
         assert_eq!(&buf[..4], &[0, 0, 0, 0]);
+    }
+
+    /// A rounded picture's corners show what is behind it, whatever that is,
+    /// and the rest of its edge is the picture, with nothing dark around it.
+    #[test]
+    fn rounded_corners_blend_with_what_is_behind() {
+        let (w, h) = (40usize, 30usize);
+        let pic = Picture { w: 40, h: 30, bgra: Arc::new([200u8, 150, 100, 255].repeat(w * h)) };
+        let behind = [10u8, 20, 30, 255];
+        let mut buf = behind.repeat(w * h);
+        let mut text = Text::new();
+        canvas(&mut buf, &mut text, w).image(&pic, Rect::new(0.0, 0.0, 40.0, 30.0), Some((Rect::new(0.0, 0.0, 40.0, 30.0), 8.0)));
+        let at = |x: usize, y: usize| &buf[(y * w + x) * 4..(y * w + x) * 4 + 3];
+        for (x, y) in [(0, 0), (39, 0), (0, 29), (39, 29)] {
+            assert_eq!(at(x, y), &behind[..3], "the very corner ({x}, {y}) is what was behind");
+        }
+        for (x, y) in [(20, 0), (20, 29), (0, 15), (39, 15), (20, 15)] {
+            assert_eq!(at(x, y), &[200, 150, 100], "the edge and middle ({x}, {y}) are the picture");
+        }
+        // On the curve: between the two, never darker than either.
+        let mid = at(2, 2)[0];
+        assert!((10..=200).contains(&mid), "{mid}");
     }
 
     #[test]

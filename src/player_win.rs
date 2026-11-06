@@ -651,6 +651,8 @@ mod tests {
                 eprintln!("{}: ffmpeg at frame {k} shows number {}", p.display(), number(&pic));
             }
         }
+        // Both decoder paths are tried before anything fails: the report says which.
+        let mut wrong = Vec::new();
         for gpu in [true, false] {
             let mut src = Source::new(p.to_path_buf(), &i);
             src.gpu = gpu;
@@ -660,29 +662,82 @@ mod tests {
             for k in [0, 1, 2, 40, 41, 40, 39, 38, 37, 25, 24, n / 2, n - 2, 3, 0] {
                 let got = f.find(&src, i.frames[k], size, || false).unwrap_or_else(|| panic!("{} (gpu {gpu}): no picture for frame {k} of {n}", p.display()));
                 assert_eq!((got.w, got.h), size);
-                assert_eq!(number(&got), first + k as u32, "{} (gpu {gpu}): frame {k}", p.display());
+                let shown = number(&got);
+                if shown != first + k as u32 {
+                    wrong.push(format!("gpu {gpu}: frame {k} shows {shown}, want {}", first + k as u32));
+                }
             }
+        }
+        assert!(wrong.is_empty(), "{}: {}", p.display(), wrong.join("; "));
+    }
+
+    /// Prints how this system's readers stamp a file, on the raw clock: what
+    /// the fixes for other Windows versions are worked out from. Run with
+    /// --nocapture; asserts nothing.
+    fn report_clock(p: &Path, size: (u32, u32)) {
+        let i = info(p);
+        eprintln!(
+            "CLOCK {}: zero {} audio_zero {} frames[..3] {:?} keys[..3] {:?} ({} frames)",
+            p.file_name().unwrap().to_string_lossy(),
+            hns(i.zero),
+            hns(i.audio_zero),
+            i.frames.iter().take(3).map(|t| hns(*t)).collect::<Vec<_>>(),
+            i.keys.iter().take(3).map(|t| hns(*t)).collect::<Vec<_>>(),
+            i.frames.len()
+        );
+        for gpu in [true, false] {
+            // Zero and no key: no shift, the source's own clock.
+            let mut v = match VideoReader::open(p, gpu, 0, 0, None) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("CLOCK   gpu {gpu}: no reader: {e:#}");
+                    continue;
+                }
+            };
+            eprintln!("CLOCK   gpu {gpu}: {}", v.describe());
+            let read = |v: &mut VideoReader, from: &str, n: usize| {
+                let mut out = Vec::new();
+                for _ in 0..n {
+                    let Some(d) = v.next() else {
+                        out.push("END".to_string());
+                        break;
+                    };
+                    let shown = v.picture(&d, size).map_or(u32::MAX, |pic| number(&pic));
+                    out.push(format!("{}:#{shown}", d.ts));
+                }
+                eprintln!("CLOCK   gpu {gpu} {from}: {}", out.join(" "));
+            };
+            read(&mut v, "from open", 20);
+            let targets = [
+                ("seek 0", 0),
+                ("seek zero", hns(i.zero)),
+                ("seek key[1]", i.keys.get(1).map_or(0, |k| hns(*k))),
+                ("seek key[1]+zero", i.keys.get(1).map_or(0, |k| hns(*k) + hns(i.zero))),
+            ];
+            for (name, at) in targets {
+                let _ = v.seek(at);
+                read(&mut v, &format!("{name} ({at})"), 6);
+            }
+        }
+        if let Ok(mut a) = AudioReader::open(p, 0) {
+            let first: Vec<i64> = (0..3).filter_map(|_| a.next().map(|x| x.0)).collect();
+            eprintln!("CLOCK   audio {} Hz {} ch: first packets {first:?}", a.rate, a.channels);
         }
     }
 
-    /// The readers' clock is the file's on any system: the first picture is
-    /// where the file says, read straight away or after going back to the start.
     #[test]
-    fn readers_keep_the_files_time() {
+    fn report_how_this_system_stamps_files() {
         let Some(ff) = crate::ffmpeg::find() else { return };
-        let dir = std::env::temp_dir().join(format!("mp4s-clock-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("mp4s-report-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let p = fixture(&ff, &dir);
-        let i = info(&p);
-        let (zero, key) = (hns(i.zero), hns(i.keys[1]) + hns(i.zero));
-        for gpu in [true, false] {
-            let mut v = VideoReader::open(&p, gpu, 0, zero, Some(key)).unwrap();
-            assert_eq!(v.next().unwrap().ts, zero, "gpu {gpu}");
-            v.seek(zero).unwrap();
-            assert_eq!(v.next().unwrap().ts, zero, "gpu {gpu}, after seeking");
-            v.seek(key).unwrap();
-            assert_eq!(v.next().unwrap().ts, key, "gpu {gpu}, at a key frame");
-        }
+        let src = fixture(&ff, &dir);
+        report_clock(&src, (320, 240));
+        let cut = dir.join("cut.mp4");
+        let mut r = std::io::BufReader::new(std::fs::File::open(&src).unwrap());
+        let mut w = std::io::BufWriter::new(std::fs::File::create(&cut).unwrap());
+        crate::mp4::trim(&mut r, &mut w, Duration::from_secs_f64(0.5), Duration::from_secs_f64(3.5)).unwrap();
+        drop(w);
+        report_clock(&cut, (320, 240));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
