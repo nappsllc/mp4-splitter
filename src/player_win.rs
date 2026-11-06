@@ -695,7 +695,7 @@ mod tests {
                 }
             };
             eprintln!("CLOCK   gpu {gpu}: {}", v.describe());
-            let mut read = |v: &mut VideoReader, from: &str, n: usize| {
+            let read = |v: &mut VideoReader, from: &str, n: usize| {
                 let mut out = Vec::new();
                 for _ in 0..n {
                     let Some(d) = v.next() else {
