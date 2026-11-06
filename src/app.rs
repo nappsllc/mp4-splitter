@@ -43,6 +43,10 @@ enum Act {
     Snap,
     Mute,
     Preset(usize),
+    /// Switch piece `i` off or on.
+    Piece(usize),
+    /// Export one file (or separate files).
+    Join(bool),
     NMinus,
     NPlus,
     NApply,
@@ -144,6 +148,8 @@ pub struct App {
     last_paint: Instant,
     muted: bool,
     snap: bool,
+    /// Export the kept pieces joined into one file.
+    join: bool,
     n: usize,
     mouse: (f32, f32),
     mods: ModifiersState,
@@ -182,6 +188,7 @@ impl App {
             last_paint: Instant::now(),
             muted: false,
             snap: false,
+            join: false,
             n: 6,
             mouse: (-1.0, -1.0),
             mods: ModifiersState::default(),
@@ -289,9 +296,10 @@ impl App {
         } else {
             d.path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."))
         };
-        let pieces = d.plan.pieces();
-        let outs = split::output_paths(&d.path, &dir, pieces.len());
-        self.exporting = Some(export::start(d.path.clone(), pieces, outs, self.wake()));
+        let pieces = d.plan.kept_pieces();
+        let join = self.join && d.plan.on.len() > 1;
+        let outs = if join { vec![split::joined_path(&d.path, &dir)] } else { split::output_paths(&d.path, &dir, pieces.len()) };
+        self.exporting = Some(export::start(d.path.clone(), pieces, outs, join, self.wake()));
         self.redraw();
     }
 
@@ -346,6 +354,11 @@ impl App {
         let Some(d) = &self.doc else { return };
         if self.playhead + Duration::from_millis(50) >= d.info.duration {
             self.playhead = Duration::ZERO;
+        }
+        // Not from a piece that is switched off: the next kept one, else the first.
+        if d.plan.dropped_at(self.playhead) {
+            let first = d.plan.kept_pieces().first().map(|p| p.0);
+            self.playhead = d.plan.next_kept(self.playhead).or(first).unwrap_or(self.playhead);
         }
         if self.audio.is_none() && d.info.has_audio {
             self.audio = Output::open();
@@ -591,12 +604,14 @@ impl App {
                     }
                 }
             }
+            Act::Piece(i) => self.toggle_piece(i),
+            Act::Join(on) => self.join = on,
             Act::NMinus => self.n = (self.n - 1).max(2),
             Act::NPlus => self.n = (self.n + 1).min(99),
             Act::NApply => self.act(Act::Preset(self.n)),
             Act::ClearCuts => {
                 if let Some(d) = &mut self.doc {
-                    d.plan.cuts.clear();
+                    d.plan.clear_cuts();
                 }
             }
             Act::ShowFolder => {
@@ -609,13 +624,26 @@ impl App {
         self.redraw();
     }
 
-    fn remove_cut_near_playhead(&mut self) {
+    /// Switch a piece off (or back on).
+    fn toggle_piece(&mut self, i: usize) {
+        let Some(d) = &mut self.doc else { return };
+        let keep = !d.plan.on.get(i).copied().unwrap_or(true);
+        if !d.plan.set_kept(i, keep) {
+            self.say("At least one piece has to stay", true, None);
+        }
+    }
+
+    /// The cut at the playhead goes; away from any cut, the piece there is
+    /// switched off or on.
+    fn remove_at_playhead(&mut self) {
         let s = self.l.s;
         let ph = self.x_of(self.playhead);
         let i = self.doc.as_ref().and_then(|d| d.plan.nearest_cut(self.playhead).filter(|&i| (self.x_of(d.plan.cuts[i]) - ph).abs() < 24.0 * s));
-        match (i, &mut self.doc) {
-            (Some(i), Some(d)) => d.plan.remove_cut(i),
-            _ => self.say("Put the playhead on a cut to remove it (↑ / ↓ go from cut to cut)", false, None),
+        let piece = self.doc.as_ref().and_then(|d| d.plan.piece_at(self.playhead));
+        match (i, piece, &mut self.doc) {
+            (Some(i), _, Some(d)) => d.plan.remove_cut(i),
+            (None, Some(p), Some(_)) => self.toggle_piece(p),
+            _ => self.say("Put the playhead on a cut or inside a piece to remove it", false, None),
         }
         self.redraw();
     }
@@ -648,7 +676,7 @@ impl App {
             }
             Key::Named(NamedKey::Home) => self.seek(Duration::ZERO),
             Key::Named(NamedKey::End) => self.seek(self.duration()),
-            Key::Named(NamedKey::Delete) | Key::Named(NamedKey::Backspace) => self.remove_cut_near_playhead(),
+            Key::Named(NamedKey::Delete) | Key::Named(NamedKey::Backspace) => self.remove_at_playhead(),
             Key::Named(NamedKey::Escape) => {
                 if self.toast.is_some() {
                     self.toast = None;
@@ -671,7 +699,8 @@ impl App {
                     "." => self.step_frame(1),
                     "i" | "[" => self.act(Act::MarkIn),
                     "o" | "]" => self.act(Act::MarkOut),
-                    "s" | "c" | "x" => self.act(Act::Cut),
+                    "s" | "c" => self.act(Act::Cut),
+                    "x" => self.remove_at_playhead(),
                     "m" => self.act(Act::Mute),
                     "n" => self.act(Act::Snap),
                     "0" => self.act(Act::ClearCuts),
@@ -960,8 +989,8 @@ impl App {
             }
             None => match &self.doc {
                 Some(d) => {
-                    let n = d.plan.pieces().len();
-                    (if n == 1 { "Export".to_string() } else { format!("Export {n} pieces") }, false)
+                    let n = d.plan.kept_pieces().len();
+                    (if n == 1 || self.join { "Export".to_string() } else { format!("Export {n} pieces") }, false)
                 }
                 None => ("Export".to_string(), false),
             },
@@ -983,8 +1012,20 @@ impl App {
             c.icon(Icon::Export, Rect::new(er.x + 16.0 * s, er.cy() - 9.0 * s, 18.0 * s, 18.0 * s), t.text_faint);
             c.text(er.x + 40.0 * s, er.cy() + 4.5 * s, 13.0 * s, if busy { t.accent } else { t.text_faint }, &label, Align::Left);
         }
+        // Separate files or one, when there is more than one piece.
+        let mut left = er.x;
+        if self.doc.as_ref().is_some_and(|d| d.plan.on.len() > 1) {
+            let one = c.text.measure("One file", 13.0 * s) + 24.0 * s;
+            let sep = c.text.measure("Separate files", 13.0 * s) + 24.0 * s;
+            let join = self.join;
+            let (ro, rs) = (Rect::new(left - 8.0 * s - one, by, one, bh), Rect::new(left - 8.0 * s - one - 2.0 * s - sep, by, sep, bh));
+            let on = |yes: bool| if yes { Style::On } else { Style::Secondary };
+            self.button(c, ro, Act::Join(true), "Join the kept pieces, in order, into one file, without re-encoding", None, Some("One file"), on(join));
+            self.button(c, rs, Act::Join(false), "Write each kept piece to its own file", None, Some("Separate files"), on(!join));
+            left = rs.x;
+        }
         let ow = c.text.measure("Open", 13.0 * s) + 18.0 * s + 6.0 * s + 28.0 * s;
-        let or = Rect::new(er.x - 8.0 * s - ow, by, ow, bh);
+        let or = Rect::new(left - 8.0 * s - ow, by, ow, bh);
         self.button(c, or, Act::Open, "Open a video (Ctrl+O), or drop one on the window", Some(Icon::Folder), Some("Open"), Style::Secondary);
         // What the file is; its name and the app's are in the window's title bar.
         if let Some(d) = &self.doc {
@@ -1149,6 +1190,7 @@ impl App {
         let cy = r.cy() - 2.0 * s;
         let Some(d) = &self.doc else { return };
         let pieces = d.plan.pieces().len();
+        let kept_pieces = d.plan.kept_pieces().len();
         let kept = d.plan.kept();
         let has_cuts = !d.plan.cuts.is_empty();
         let mut x = r.x + 4.0 * s;
@@ -1187,7 +1229,7 @@ impl App {
             x += bh;
         }
         // The summary, on the right.
-        let summary = format!("{}  ·  {} piece{}", split::timecode(kept), pieces, if pieces == 1 { "" } else { "s" });
+        let summary = format!("{}  ·  {} piece{}", split::timecode(kept), kept_pieces, if kept_pieces == 1 { "" } else { "s" });
         let sw = c.text.measure(&summary, 13.0 * s);
         if r.right() - sw > x + 20.0 * s {
             let lw = c.text.measure("Kept ", 13.0 * s);
@@ -1202,7 +1244,7 @@ impl App {
         if p.len() != n {
             return false;
         }
-        let each = d.plan.kept().as_secs_f64() / n as f64;
+        let each = d.plan.span().as_secs_f64() / n as f64;
         let tol = if self.snap { each * 0.5 } else { 0.002 };
         p.iter().all(|(a, b)| ((*b - *a).as_secs_f64() - each).abs() <= tol)
     }
@@ -1307,7 +1349,7 @@ impl App {
                 let v = v.sqrt(); // perceptual
                 if v > 0.0 {
                     let tt = Duration::from_secs_f64(ta);
-                    let kept = tt >= d.plan.start && tt <= d.plan.end;
+                    let kept = tt >= d.plan.start && tt <= d.plan.end && !d.plan.dropped_at(tt);
                     let col = if kept { t.accent.with_alpha(200) } else { t.text_faint.with_alpha(150) };
                     let hh = (v * amp).max(0.5 * s);
                     c.rect(Rect::new(x, mid - hh, (step - 0.5 * s).max(1.0), hh * 2.0), col);
@@ -1327,6 +1369,14 @@ impl App {
         }
         if xe < track.right() {
             c.rect(Rect::new(xe, body.y, track.right() - xe, body.h), t.dim);
+        }
+        // Pieces switched off: dimmed and struck through.
+        for ((a, b), on) in d.plan.pieces().into_iter().zip(&d.plan.on) {
+            let (x0, x1) = (x_of(a).max(track.x), x_of(b).min(track.right()));
+            if !*on && x1 > x0 {
+                c.rect(Rect::new(x0, body.y, x1 - x0, body.h), t.dim);
+                c.line(x0, body.cy(), x1, body.cy(), 2.0 * s, t.cut.with_alpha(220));
+            }
         }
         // The kept part's frame and handles.
         let hover_m = if self.drag.is_none() { self.marker_at(self.mouse.0, self.mouse.1) } else { None };
@@ -1380,13 +1430,22 @@ impl App {
             if x1 - x0 < 18.0 * s {
                 continue;
             }
+            let on = d.plan.on.get(i).copied().unwrap_or(true);
             let full = format!("{}  ·  {}", i + 1, split::timecode(*b - *a));
             let lbl = if c.text.measure(&full, 11.0 * s) + 20.0 * s < x1 - x0 { full } else { (i + 1).to_string() };
             let w = c.text.measure(&lbl, 11.0 * s) + 14.0 * s;
             let cx = (x0 + x1) / 2.0;
             let pr = Rect::new(cx - w / 2.0, l.labels.y + 5.0 * s, w, 18.0 * s);
-            c.rrect(pr, 9.0 * s, t.accent_soft);
-            c.text(cx, pr.cy() + 4.0 * s, 11.0 * s, t.accent, &lbl, Align::Center);
+            let hot = self.hover == Some(Act::Piece(i));
+            c.rrect(pr, 9.0 * s, if on { t.accent_soft } else { t.hover });
+            if hot {
+                c.rrect_stroke(pr, 9.0 * s, 1.0 * s, if on { t.accent } else { t.text_muted });
+            }
+            c.text(cx, pr.cy() + 4.0 * s, 11.0 * s, if on { t.accent } else { t.text_faint }, &lbl, Align::Center);
+            if !on {
+                c.line(pr.x + 5.0 * s, pr.cy(), pr.right() - 5.0 * s, pr.cy(), 1.0 * s, t.text_muted);
+            }
+            self.hits.push((pr, Act::Piece(i), if on { "Leave this piece out (Delete at the playhead)" } else { "Put this piece back" }));
         }
         // Where the pointer is.
         let (mx, my) = self.mouse;
@@ -1724,6 +1783,17 @@ impl ApplicationHandler<UserEvent> for App {
             }
             el.exit();
             return;
+        }
+        // Playing into a piece that is switched off: on to the next kept one,
+        // or stop when none is left.
+        if let (Some(pb), Some(d)) = (&self.playing, &self.doc) {
+            let now = pb.clock(self.audio.as_ref());
+            if d.plan.dropped_at(now) {
+                match d.plan.next_kept(now) {
+                    Some(t) => self.seek(t),
+                    None => self.pause(),
+                }
+            }
         }
         let mut wait: Option<Instant> = self.autoclose;
         let earliest = |w: &mut Option<Instant>, t: Instant| *w = Some(w.map_or(t, |x| x.min(t)));

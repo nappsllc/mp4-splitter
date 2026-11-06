@@ -18,6 +18,14 @@ without re-encoding.** Windows, macOS and Linux. Apache-2.0.
   or <kbd>I</kbd> / <kbd>O</kbd> at the playhead.
 - **Cut in the middle**: <kbd>S</kbd> at the playhead, or double-click the
   timeline. Drag a cut to move it; right-click or double-click it to remove it.
+- **Remove the gaps**: click a piece's label on the timeline, or press
+  <kbd>Delete</kbd> or <kbd>X</kbd> with the playhead inside it, to switch it
+  off. Dropped pieces are dimmed and struck through, and playback skips them.
+- **Separate files or one file**: export each kept piece to its own file, or
+  join them in order into one, still without re-encoding. Each joined piece
+  starts at its key frame and an edit list hides the lead-in, so players that
+  ignore edit lists (Windows' own) also show those frames; turn on *Snap to key
+  frames* first if that matters.
 - **Presets**: split the kept part into 2, 3, 4, 5 or any number of equal
   pieces (the buttons, or <kbd>2</kbd>–<kbd>9</kbd>).
 - **A timeline like YouTube Studio's**: thumbnails, the sound's waveform, a
@@ -44,8 +52,8 @@ without re-encoding.** Windows, macOS and Linux. Apache-2.0.
 | <kbd>PgUp</kbd> <kbd>PgDn</kbd> | Previous / next key frame |
 | <kbd>Home</kbd> <kbd>End</kbd> | Start / end of the video |
 | <kbd>I</kbd> or <kbd>[</kbd>, <kbd>O</kbd> or <kbd>]</kbd> | Set the start / end at the playhead |
-| <kbd>S</kbd> (or <kbd>C</kbd>, <kbd>X</kbd>) | Cut at the playhead |
-| <kbd>Delete</kbd> | Remove the cut at the playhead |
+| <kbd>S</kbd> (or <kbd>C</kbd>) | Cut at the playhead |
+| <kbd>Delete</kbd> or <kbd>X</kbd> | Remove the cut at the playhead; away from a cut, switch the piece there off or on |
 | <kbd>2</kbd>–<kbd>9</kbd>, <kbd>0</kbd> | Split into N equal pieces; remove all cuts |
 | <kbd>N</kbd> | Snap to key frames |
 | <kbd>M</kbd> | Mute |
@@ -54,7 +62,8 @@ without re-encoding.** Windows, macOS and Linux. Apache-2.0.
 | <kbd>Ctrl</kbd>+<kbd>E</kbd> | Export next to the video (<kbd>Shift</kbd>+click Export: choose a folder) |
 
 Pieces are saved as `<name>_part01.mp4`, `<name>_part02.mp4`, … (or
-`<name>_trimmed.mp4` for one piece) and never overwrite a file.
+`<name>_trimmed.mp4` for one piece), joined ones as `<name>_edited.mp4`, and
+never overwrite a file.
 
 ## ffmpeg
 
@@ -72,6 +81,8 @@ mp4-splitter [VIDEO]                    open the window
 mp4-splitter --split 3 VIDEO            three equal pieces, no window
 mp4-splitter --cut 12.5,40 VIDEO        cut at 12.5 s and 40 s
      [--start S] [--end E]              keep only S..E (seconds)
+     [--drop 2,4]                       leave out these pieces (from 1)
+     [--join]                           join what is kept into one file
 mp4-splitter --info VIDEO               frames, key frames, size, codecs
 ```
 

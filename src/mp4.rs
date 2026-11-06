@@ -411,12 +411,13 @@ fn runs<T: PartialEq + Copy>(v: impl Iterator<Item = T>) -> Vec<(u32, T)> {
     out
 }
 
-fn elst(k: &Keep) -> Vec<u8> {
-    let wide = k.shown > u32::MAX as u64 || k.media_time > i32::MAX as u64 || k.empty > u32::MAX as u64;
-    let entries: Vec<(u64, i64)> = if k.empty > 0 { vec![(k.empty, -1), (k.shown, k.media_time as i64)] } else { vec![(k.shown, k.media_time as i64)] };
+/// The edit list box for these entries: how long (movie timescale) and the
+/// media time shown from (track timescale; -1 for empty time).
+fn elst(entries: &[(u64, i64)]) -> Vec<u8> {
+    let wide = entries.iter().any(|&(d, mt)| d > u32::MAX as u64 || mt > i32::MAX as i64);
     let mut b = Vec::new();
     put32(&mut b, entries.len() as u32);
-    for (d, mt) in entries {
+    for &(d, mt) in entries {
         if wide {
             put64(&mut b, d);
             put64(&mut b, mt as u64);
@@ -450,9 +451,8 @@ pub(crate) struct OutTrack<'t, 'a> {
     /// Write `ctts` (with this version) / `stss`.
     pub ctts: Option<u8>,
     pub stss: bool,
-    /// Leading empty time, the shown part's media time and length (see
-    /// [`Keep`]; only those fields are used).
-    pub edit: Keep,
+    /// The edit list's entries (see [`elst`]).
+    pub edit: Vec<(u64, i64)>,
     /// Sample descriptions to write instead of the old track's.
     pub stsd: Option<Vec<u8>>,
 }
@@ -472,7 +472,56 @@ impl<'t, 'a> OutTrack<'t, 'a> {
                 desc: s.desc[i],
             })
             .collect();
-        OutTrack { t, samples, ctts: s.ctts.as_ref().map(|c| c.1), stss: s.sync.is_some(), edit: k, stsd: None }
+        let mut edit = if k.empty > 0 { vec![(k.empty, -1)] } else { Vec::new() };
+        edit.push((k.shown, k.media_time as i64));
+        OutTrack { t, samples, ctts: s.ctts.as_ref().map(|c| c.1), stss: s.sync.is_some(), edit, stsd: None }
+    }
+
+    /// `pieces` of `t` one after another: what each keeps (`None`: nothing,
+    /// the track is silent for that long) and how long it shows (movie
+    /// timescale). A piece's samples never overlap the next one's in
+    /// composition time (a sample's duration grows if they would), so each
+    /// edit list entry shows only its own piece.
+    pub(crate) fn joined(t: &'t Track<'a>, pieces: &[(Option<Keep>, u64)], movie: u32) -> OutTrack<'t, 'a> {
+        let s = &t.s;
+        let dts = s.dts();
+        let (mut samples, mut edit) = (Vec::<OutSample>::new(), Vec::new());
+        let mut base = 0i64; // where the next piece's first sample decodes
+        let mut reach = i64::MIN; // the composition time the pieces so far need
+        for &(k, len) in pieces {
+            let Some(k) = k else {
+                edit.push((len, -1));
+                continue;
+            };
+            if k.empty > 0 {
+                edit.push((k.empty, -1));
+            }
+            let d0 = dts[k.first] as i64;
+            let cts = |i: usize| s.cts(i, dts[i]) - d0;
+            let lo = (k.first..k.last).map(cts).min().unwrap_or(0);
+            if let Some(last) = samples.last_mut() {
+                let short = reach - lo - base;
+                if short > 0 {
+                    last.dur += short as u32;
+                    base += short;
+                }
+            }
+            edit.push((k.shown, base + k.media_time as i64));
+            let hi = (k.first..k.last).map(|i| cts(i) + s.durations[i] as i64).max().unwrap_or(0);
+            let shown = (k.shown as u128 * t.timescale as u128).div_ceil(movie.max(1) as u128) as i64;
+            reach = base + hi.max(k.media_time as i64 + shown);
+            base += s.durations[k.first..k.last].iter().map(|d| *d as i64).sum::<i64>();
+            samples.extend(OutTrack::kept(t, k).samples);
+        }
+        while edit.last().is_some_and(|e| e.1 == -1) {
+            edit.pop();
+        }
+        OutTrack { t, samples, ctts: s.ctts.as_ref().map(|c| c.1), stss: s.sync.is_some(), edit, stsd: None }
+    }
+
+    /// The length of its edit list (movie timescale).
+    fn shown(&self) -> u64 {
+        self.edit.iter().map(|e| e.0).sum()
     }
 }
 
@@ -550,9 +599,8 @@ fn write_trak(o: &OutTrack, offsets: &[u64]) -> Vec<u8> {
     let mut mdia = boxed(b"mdhd", &with_duration(t.mdhd.body, 16, 24, media_dur));
     mdia.extend_from_slice(t.hdlr.raw);
     mdia.extend(boxed(b"minf", &minf));
-    let k = &o.edit;
-    let mut trak = boxed(b"tkhd", &with_duration(t.tkhd.body, 20, 28, k.empty + k.shown));
-    trak.extend(elst(k));
+    let mut trak = boxed(b"tkhd", &with_duration(t.tkhd.body, 20, 28, o.shown()));
+    trak.extend(elst(&o.edit));
     trak.extend(boxed(b"mdia", &mdia));
     boxed(b"trak", &trak)
 }
@@ -628,7 +676,7 @@ pub(crate) fn write_movie<W: Write>(m: &Movie, tracks: &[OutTrack], sources: &mu
     }
     let mdat_len = pos;
     let moov = |shift: u64| -> Vec<u8> {
-        let shown = tracks.iter().map(|t| t.edit.empty + t.edit.shown).max().unwrap_or(0);
+        let shown = tracks.iter().map(OutTrack::shown).max().unwrap_or(0);
         let mut body = boxed(b"mvhd", &with_duration(mvhd.body, 16, 24, shown));
         for (ti, t) in tracks.iter().enumerate() {
             let offs: Vec<u64> = rel[ti].iter().map(|o| o + shift).collect();
@@ -686,22 +734,56 @@ pub struct Trimmed {
     pub bytes: u64,
 }
 
-/// Copy `src`'s `start..end` (presentation time) into `dst`.
-pub fn trim<R: Read + Seek, W: Write>(src: &mut R, dst: &mut W, start: Duration, end: Duration) -> Result<Trimmed> {
-    ensure!(end > start, "the trim is empty");
-    let m = Movie::read(src)?;
-    let (movie, tracks) = m.tracks()?;
-    // The video starts at the key frame before the start, `lead` early.
-    // The sound starts as early (to within a packet): players that ignore
-    // edit lists (Windows' own) then keep picture and sound in step, and
-    // the ones that honour them skip the same time in both.
+/// What each track keeps of `start..end`. The video starts at the key frame
+/// before the start, `lead` early. The sound starts as early (to within a
+/// packet): players that ignore edit lists (Windows' own) then keep picture
+/// and sound in step, and the ones that honour them skip the same time in
+/// both.
+fn keeps_of(tracks: &[Track], movie: u32, start: Duration, end: Duration) -> Vec<Option<Keep>> {
     let lead = tracks.iter().find(|t| t.video).and_then(|t| {
         let k = plan(&t.s, t.edit, t.timescale, movie, true, start, end, Duration::ZERO)?;
         Some(Duration::from_nanos((k.media_time as u128 * 1_000_000_000 / t.timescale.max(1) as u128) as u64))
     });
     let preroll = lead.unwrap_or(AUDIO_PREROLL);
-    let keeps: Vec<Option<Keep>> =
-        tracks.iter().map(|t| plan(&t.s, t.edit, t.timescale, movie, t.video, start, end, if t.video { Duration::ZERO } else { preroll })).collect();
+    tracks.iter().map(|t| plan(&t.s, t.edit, t.timescale, movie, t.video, start, end, if t.video { Duration::ZERO } else { preroll })).collect()
+}
+
+/// Copy `src`'s `ranges` (presentation time, in order and apart or touching)
+/// into `dst` as one movie: each range keeps its lead-in from its key frame,
+/// and an edit list entry per range shows only what was asked. Ranges that
+/// touch are one range. The bytes written.
+pub fn join<R: Read + Seek, W: Write>(src: &mut R, dst: &mut W, ranges: &[(Duration, Duration)]) -> Result<u64> {
+    let mut merged: Vec<(Duration, Duration)> = Vec::with_capacity(ranges.len());
+    for &(a, b) in ranges {
+        ensure!(b > a, "a piece is empty");
+        match merged.last_mut() {
+            Some(last) if a <= last.1 => last.1 = last.1.max(b),
+            _ => merged.push((a, b)),
+        }
+    }
+    ensure!(!merged.is_empty(), "nothing to keep");
+    let m = Movie::read(src)?;
+    let (movie, tracks) = m.tracks()?;
+    let keeps: Vec<Vec<Option<Keep>>> = merged.iter().map(|&(a, b)| keeps_of(&tracks, movie, a, b)).collect();
+    let outs: Vec<OutTrack> = tracks
+        .iter()
+        .enumerate()
+        .filter(|(ti, _)| keeps.iter().any(|k| k[*ti].is_some()))
+        .map(|(ti, t)| {
+            let pieces: Vec<(Option<Keep>, u64)> = keeps.iter().zip(&merged).map(|(k, &(a, b))| (k[ti], ticks(b - a, movie))).collect();
+            OutTrack::joined(t, &pieces, movie)
+        })
+        .collect();
+    ensure!(!outs.is_empty(), "nothing to keep in those ranges");
+    write_movie(&m, &outs, &mut [src], dst)
+}
+
+/// Copy `src`'s `start..end` (presentation time) into `dst`.
+pub fn trim<R: Read + Seek, W: Write>(src: &mut R, dst: &mut W, start: Duration, end: Duration) -> Result<Trimmed> {
+    ensure!(end > start, "the trim is empty");
+    let m = Movie::read(src)?;
+    let (movie, tracks) = m.tracks()?;
+    let keeps = keeps_of(&tracks, movie, start, end);
     ensure!(keeps.iter().any(Option::is_some), "nothing to keep in that range");
     let outs: Vec<OutTrack> = tracks.iter().zip(&keeps).filter_map(|(t, k)| k.map(|k| OutTrack::kept(t, k))).collect();
     let bytes = write_movie(&m, &outs, &mut [src], dst)?;
@@ -897,6 +979,99 @@ mod tests {
         let want = crate::ffmpeg::picture_at(&ff, &src, Duration::from_secs_f64(t), 320, 240, false).unwrap();
         let got = crate::ffmpeg::picture_at(&ff, &dst, Duration::ZERO, 320, 240, false).unwrap();
         assert!(want.rgba == got.rgba, "the first picture of the piece is not the one at {t:.3} s");
+    }
+
+    /// Every picture ffmpeg shows of `p`, 16 x 12 and grey.
+    fn frames_of(ff: &Path, p: &Path) -> Vec<Vec<u8>> {
+        let out = Command::new(ff)
+            .args(["-v", "error", "-i"])
+            .arg(p)
+            .args(["-map", "0:v", "-fps_mode", "passthrough", "-vf", "scale=16:12", "-f", "rawvideo", "-pix_fmt", "gray", "-"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        out.stdout.chunks(16 * 12).map(<[u8]>::to_vec).collect()
+    }
+
+    /// How long the sound of `p` lasts, decoded.
+    fn sound_of(ff: &Path, p: &Path) -> f64 {
+        let out = Command::new(ff).args(["-v", "error", "-i"]).arg(p).args(["-map", "0:a", "-f", "s16le", "-ac", "1", "-ar", "8000", "-"]).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        out.stdout.len() as f64 / 16000.0
+    }
+
+    fn join_to(src: &Path, name: &str, ranges: &[(f64, f64)]) -> PathBuf {
+        let dst = src.with_file_name(name);
+        let mut r = std::io::BufReader::new(std::fs::File::open(src).unwrap());
+        let mut w = std::io::BufWriter::new(std::fs::File::create(&dst).unwrap());
+        let ranges: Vec<_> = ranges.iter().map(|&(a, b)| (Duration::from_secs_f64(a), Duration::from_secs_f64(b))).collect();
+        join(&mut r, &mut w, &ranges).unwrap();
+        dst
+    }
+
+    /// The joined file holds exactly the frames of `ranges` (given in frames
+    /// at 30 fps), its sound as long as its picture, and it decodes without
+    /// an error. A piece starting between key frames gets its first timestamp
+    /// from ffmpeg's demuxer a few frames off (it counts decode time from the
+    /// first frame shown), which its null muxer remarks on: only `on_keys`
+    /// joins have to be silent.
+    fn check_join(ff: &Path, src: &Path, name: &str, ranges: &[(usize, usize)], on_keys: bool) {
+        let secs: Vec<(f64, f64)> = ranges.iter().map(|&(a, b)| (a as f64 / 30.0, b as f64 / 30.0)).collect();
+        let dst = join_to(src, name, &secs);
+        if on_keys {
+            decodes_clean(ff, &dst);
+        } else {
+            let out = Command::new(ff).args(["-v", "error", "-i"]).arg(&dst).args(["-f", "null", "-"]).output().unwrap();
+            let err = String::from_utf8_lossy(&out.stderr);
+            assert!(out.status.success() && err.lines().all(|l| l.contains("non monotonically increasing dts")), "{name}: {err}");
+        }
+        let want: f64 = secs.iter().map(|(a, b)| b - a).sum();
+        let got = duration_by_ffprobe(ff, &dst);
+        assert!((got - want).abs() < 0.04, "{name}: {got} s, want {want} s");
+        let sound = sound_of(ff, &dst);
+        assert!((sound - want).abs() < 0.1, "{name}: {sound} s of sound, want {want} s");
+        let all = frames_of(ff, src);
+        let expect: Vec<usize> = ranges.iter().flat_map(|&(a, b)| a..b).collect();
+        let frames = frames_of(ff, &dst);
+        assert_eq!(frames.len(), expect.len(), "{name}: frame count");
+        for (k, (f, &i)) in frames.iter().zip(&expect).enumerate() {
+            assert!(*f == all[i], "{name}: picture {k} is not frame {i} of the source");
+        }
+    }
+
+    #[test]
+    fn joined_pieces_show_exactly_the_kept_frames() {
+        let Some(ff) = ffmpeg() else { return };
+        let src = fixture(&ff, "join.mp4", &[]);
+        // Mid-GOP cuts, on key frames, and to the very end.
+        check_join(&ff, &src, "join-a.mp4", &[(15, 66), (102, 123), (150, 174)], false);
+        check_join(&ff, &src, "join-b.mp4", &[(0, 30), (60, 90), (120, 180)], true);
+    }
+
+    #[test]
+    fn joined_pieces_may_share_a_group_of_pictures() {
+        let Some(ff) = ffmpeg() else { return };
+        let src = fixture(&ff, "share.mp4", &[]);
+        check_join(&ff, &src, "share-a.mp4", &[(32, 40), (45, 52), (55, 70)], false);
+    }
+
+    #[test]
+    fn touching_pieces_become_one_edit() {
+        let Some(ff) = ffmpeg() else { return };
+        let src = fixture(&ff, "touch.mp4", &[]);
+        let a = join_to(&src, "touch-a.mp4", &[(1.0, 2.0), (2.0, 3.0)]);
+        let b = join_to(&src, "touch-b.mp4", &[(1.0, 3.0)]);
+        assert!(std::fs::read(a).unwrap() == std::fs::read(b).unwrap());
+    }
+
+    #[test]
+    fn one_joined_piece_is_a_trim() {
+        let Some(ff) = ffmpeg() else { return };
+        let src = fixture(&ff, "single.mp4", &[]);
+        let a = join_to(&src, "single-a.mp4", &[(1.5, 4.25)]);
+        let b = src.with_file_name("single-b.mp4");
+        cut(&src, &b, 1.5, 4.25);
+        assert!(std::fs::read(a).unwrap() == std::fs::read(b).unwrap());
     }
 
     #[test]

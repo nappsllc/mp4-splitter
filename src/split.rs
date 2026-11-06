@@ -1,5 +1,6 @@
 //! The split plan: what is kept (start..end), where it is cut in the
-//! middle, and the pieces that come out. Pure: no files, no UI.
+//! middle, the pieces that come out and which of them are switched off.
+//! Pure: no files, no UI.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -23,16 +24,24 @@ pub struct Plan {
     /// Sorted, each strictly inside `start..end` and at least
     /// [`MIN_PIECE`] from its neighbours.
     pub cuts: Vec<Duration>,
+    /// Whether each piece is kept: always one more than `cuts`, and at
+    /// least one is true.
+    pub on: Vec<bool>,
 }
 
 impl Plan {
     pub fn new(duration: Duration) -> Plan {
-        Plan { duration, start: Duration::ZERO, end: duration, cuts: Vec::new() }
+        Plan { duration, start: Duration::ZERO, end: duration, cuts: Vec::new(), on: vec![true] }
     }
 
-    /// The kept length.
-    pub fn kept(&self) -> Duration {
+    /// From the start to the end, the pieces switched off included.
+    pub fn span(&self) -> Duration {
         self.end - self.start
+    }
+
+    /// The length of the pieces kept.
+    pub fn kept(&self) -> Duration {
+        self.kept_pieces().iter().map(|(a, b)| *b - *a).sum()
     }
 
     /// The pieces, in order.
@@ -42,6 +51,36 @@ impl Plan {
         edges.extend_from_slice(&self.cuts);
         edges.push(self.end);
         edges.windows(2).map(|w| (w[0], w[1])).collect()
+    }
+
+    /// The pieces kept, in order.
+    pub fn kept_pieces(&self) -> Vec<(Duration, Duration)> {
+        self.pieces().into_iter().zip(&self.on).filter(|(_, on)| **on).map(|(p, _)| p).collect()
+    }
+
+    /// The piece `t` is in, if it is between the start and the end.
+    pub fn piece_at(&self, t: Duration) -> Option<usize> {
+        (self.start..self.end).contains(&t).then(|| self.cuts.partition_point(|c| *c <= t))
+    }
+
+    /// Is `t` in a piece that is switched off?
+    pub fn dropped_at(&self, t: Duration) -> bool {
+        self.piece_at(t).is_some_and(|i| !self.on[i])
+    }
+
+    /// Where the first kept piece starting after `t` starts.
+    pub fn next_kept(&self, t: Duration) -> Option<Duration> {
+        self.pieces().into_iter().zip(&self.on).find(|((a, _), on)| **on && *a > t).map(|((a, _), _)| a)
+    }
+
+    /// Keep piece `i` or switch it off; false (nothing changes) when there
+    /// is no such piece, or it is the only one left.
+    pub fn set_kept(&mut self, i: usize, keep: bool) -> bool {
+        if i >= self.on.len() || (!keep && self.on[i] && self.on.iter().filter(|x| **x).count() == 1) {
+            return false;
+        }
+        self.on[i] = keep;
+        true
     }
 
     /// Where a marker is.
@@ -79,19 +118,33 @@ impl Plan {
     /// Set the start at `t`, dropping the cuts it passes (the I key).
     pub fn mark_in(&mut self, t: Duration) {
         let t = t.min(self.end.saturating_sub(MIN_PIECE));
-        self.cuts.retain(|c| *c >= t + MIN_PIECE);
+        let gone = self.cuts.partition_point(|c| *c < t + MIN_PIECE);
+        self.cuts.drain(..gone);
+        self.on.drain(..gone);
         self.start = t;
+        self.keep_one();
     }
 
     /// Set the end at `t`, dropping the cuts it passes (the O key).
     pub fn mark_out(&mut self, t: Duration) {
         let t = t.max(self.start + MIN_PIECE).min(self.duration);
-        self.cuts.retain(|c| *c + MIN_PIECE <= t);
+        let left = self.cuts.partition_point(|c| *c + MIN_PIECE <= t);
+        self.cuts.truncate(left);
+        self.on.truncate(left + 1);
         self.end = t;
+        self.keep_one();
     }
 
-    /// Cut at `t`; its index, or `None` when `t` is outside the kept part or
-    /// too close to another marker.
+    /// A trim that left only pieces switched off switches them back on.
+    fn keep_one(&mut self) {
+        if !self.on.contains(&true) {
+            self.on.fill(true);
+        }
+    }
+
+    /// Cut at `t` (both halves are kept or not as the piece was); its index,
+    /// or `None` when `t` is outside the kept part or too close to another
+    /// marker.
     pub fn add_cut(&mut self, t: Duration) -> Option<usize> {
         if t < self.start + MIN_PIECE || t + MIN_PIECE > self.end {
             return None;
@@ -101,13 +154,23 @@ impl Plan {
         }
         let i = self.cuts.partition_point(|c| *c < t);
         self.cuts.insert(i, t);
+        self.on.insert(i, self.on[i]);
         Some(i)
     }
 
+    /// Remove cut `i`; the merged piece is kept if either side was.
     pub fn remove_cut(&mut self, i: usize) {
         if i < self.cuts.len() {
             self.cuts.remove(i);
+            let next = self.on.remove(i + 1);
+            self.on[i] |= next;
         }
+    }
+
+    /// Remove every cut: one piece, kept.
+    pub fn clear_cuts(&mut self) {
+        self.cuts.clear();
+        self.on = vec![true];
     }
 
     /// Move cut `i` to `t`, kept between its neighbours; where it landed.
@@ -131,12 +194,13 @@ impl Plan {
         }
     }
 
-    /// Replace the cuts with ones that make `n` equal pieces of the kept
-    /// part (each snapped by `snap`, which may move it to a key frame).
+    /// Replace the cuts with ones that make `n` equal pieces of the part
+    /// between the start and the end, all kept (each cut snapped by `snap`,
+    /// which may move it to a key frame).
     pub fn split_equal(&mut self, n: usize, snap: impl Fn(Duration) -> Duration) {
-        self.cuts.clear();
+        self.clear_cuts();
         let n = n.max(1) as u128;
-        let (s, len) = (self.start.as_nanos(), self.kept().as_nanos());
+        let (s, len) = (self.start.as_nanos(), self.span().as_nanos());
         for k in 1..n {
             let t = Duration::from_nanos((s + len * k / n) as u64);
             self.add_cut(snap(t));
@@ -186,6 +250,13 @@ pub fn output_paths(src: &Path, dir: &Path, n: usize) -> Vec<PathBuf> {
             unique(dir, &base, &ext)
         })
         .collect()
+}
+
+/// The file the kept pieces are joined into, in `dir`: `<stem>_edited.<ext>`.
+pub fn joined_path(src: &Path, dir: &Path) -> PathBuf {
+    let stem = src.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "video".into());
+    let ext = src.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).filter(|e| !e.is_empty()).unwrap_or_else(|| "mp4".into());
+    unique(dir, &format!("{stem}_edited"), &ext)
 }
 
 fn unique(dir: &Path, base: &str, ext: &str) -> PathBuf {
@@ -296,6 +367,112 @@ mod tests {
         assert_eq!(p.pieces().len(), 3);
     }
 
+    /// A 10 s plan cut at 2, 4, 6 and 8 s with the second and fourth pieces off.
+    fn with_gaps() -> Plan {
+        let mut p = Plan::new(s(10.0));
+        p.split_equal(5, |t| t);
+        assert!(p.set_kept(1, false) && p.set_kept(3, false));
+        p
+    }
+
+    #[test]
+    fn dropped_pieces_are_left_out() {
+        let p = with_gaps();
+        assert_eq!(p.pieces().len(), 5);
+        assert_eq!(p.kept_pieces(), vec![(s(0.0), s(2.0)), (s(4.0), s(6.0)), (s(8.0), s(10.0))]);
+        assert_eq!(p.kept(), s(6.0));
+        assert_eq!(p.span(), s(10.0));
+    }
+
+    #[test]
+    fn the_last_kept_piece_cannot_be_dropped() {
+        let mut p = Plan::new(s(10.0));
+        assert!(!p.set_kept(0, false));
+        p.add_cut(s(5.0));
+        assert!(p.set_kept(0, false));
+        assert!(!p.set_kept(1, false));
+        assert!(!p.set_kept(2, false));
+        assert!(p.set_kept(0, true));
+        assert_eq!(p.on, vec![true, true]);
+    }
+
+    #[test]
+    fn a_piece_keeps_its_flag_when_a_marker_moves() {
+        let mut p = with_gaps();
+        p.move_cut(1, s(5.0));
+        p.set_start(s(1.0));
+        p.set_end(s(9.0));
+        assert_eq!(p.on, vec![true, false, true, false, true]);
+    }
+
+    #[test]
+    fn both_halves_inherit_a_new_cut() {
+        let mut p = with_gaps();
+        assert_eq!(p.add_cut(s(3.0)), Some(1));
+        assert_eq!(p.on, vec![true, false, false, true, false, true]);
+        assert_eq!(p.add_cut(s(5.0)), Some(3));
+        assert_eq!(p.on, vec![true, false, false, true, true, false, true]);
+    }
+
+    #[test]
+    fn a_merged_piece_is_kept_if_either_side_was() {
+        let mut p = with_gaps();
+        p.remove_cut(0);
+        assert_eq!(p.on, vec![true, true, false, true]);
+        let mut q = Plan::new(s(9.0));
+        q.split_equal(3, |t| t);
+        q.set_kept(0, false);
+        q.set_kept(1, false);
+        q.remove_cut(0);
+        assert_eq!(q.on, vec![false, true]);
+    }
+
+    #[test]
+    fn presets_and_clearing_keep_everything() {
+        let mut p = with_gaps();
+        p.split_equal(3, |t| t);
+        assert_eq!(p.on, vec![true; 3]);
+        let mut q = with_gaps();
+        q.clear_cuts();
+        assert_eq!(q.on, vec![true]);
+    }
+
+    #[test]
+    fn trims_drop_the_flags_of_the_pieces_they_pass() {
+        let mut p = with_gaps();
+        p.mark_in(s(3.0)); // inside the second piece, which is off
+        assert_eq!(p.cuts, vec![s(4.0), s(6.0), s(8.0)]);
+        assert_eq!(p.on, vec![false, true, false, true]);
+        p.mark_out(s(7.0)); // inside the fourth piece, also off
+        assert_eq!(p.cuts, vec![s(4.0), s(6.0)]);
+        assert_eq!(p.on, vec![false, true, false]);
+    }
+
+    #[test]
+    fn a_trim_that_leaves_nothing_kept_turns_the_rest_back_on() {
+        let mut p = Plan::new(s(10.0));
+        p.add_cut(s(5.0));
+        p.set_kept(1, false);
+        p.mark_in(s(7.0));
+        assert_eq!(p.on, vec![true]);
+    }
+
+    #[test]
+    fn playback_finds_the_next_kept_piece() {
+        let p = with_gaps();
+        assert_eq!(p.piece_at(s(2.0)), Some(1));
+        assert_eq!(p.piece_at(s(10.0)), None);
+        assert!(!p.dropped_at(s(1.0)));
+        assert!(p.dropped_at(s(3.0)));
+        assert_eq!(p.next_kept(s(3.0)), Some(s(4.0)));
+        assert_eq!(p.next_kept(s(7.0)), Some(s(8.0)));
+        assert_eq!(p.next_kept(s(9.0)), None);
+        let mut trailing = with_gaps();
+        trailing.set_kept(4, false);
+        assert!(trailing.dropped_at(s(9.0)));
+        assert_eq!(trailing.next_kept(s(9.0)), None);
+    }
+
     #[test]
     fn stepping_and_nearest() {
         let l = vec![s(0.0), s(1.0), s(2.0)];
@@ -319,6 +496,7 @@ mod tests {
         assert_eq!(v[2], d.join("My clip_part03.mp4"));
         std::fs::write(d.join("My clip_part01.mp4"), b"").unwrap();
         assert_eq!(output_paths(src, &d, 2)[0], d.join("My clip_part01 (2).mp4"));
+        assert_eq!(joined_path(src, &d), d.join("My clip_edited.mp4"));
         std::fs::remove_dir_all(&d).unwrap();
     }
 
