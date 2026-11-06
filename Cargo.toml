@@ -1,6 +1,6 @@
 [package]
 name = "mp4-splitter"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "Apache-2.0"
 description = "Tiny, good-looking, cross-platform tool that splits MP4 videos losslessly"
