@@ -949,11 +949,7 @@ impl App {
         let t = self.theme;
         let l = self.l;
         let s = l.s;
-        let (x0, cy) = (16.0 * s, l.header.cy());
-        c.rrect(Rect::new(x0, cy - 15.0 * s, 30.0 * s, 30.0 * s), 8.0 * s, t.accent);
-        c.icon(Icon::Scissors, Rect::new(x0 + 6.0 * s, cy - 9.0 * s, 18.0 * s, 18.0 * s), t.on_accent);
-        let mut x = x0 + 40.0 * s;
-        x += c.text(x, cy + 5.5 * s, 15.0 * s, t.text, "MP4 Splitter", Align::Left);
+        let (x, cy) = (16.0 * s, l.header.cy());
         // The buttons, from the right.
         let bh = 34.0 * s;
         let by = cy - bh / 2.0;
@@ -990,9 +986,8 @@ impl App {
         let ow = c.text.measure("Open", 13.0 * s) + 18.0 * s + 6.0 * s + 28.0 * s;
         let or = Rect::new(er.x - 8.0 * s - ow, by, ow, bh);
         self.button(c, or, Act::Open, "Open a video (Ctrl+O), or drop one on the window", Some(Icon::Folder), Some("Open"), Style::Secondary);
-        // The file and what it is.
+        // What the file is; its name and the app's are in the window's title bar.
         if let Some(d) = &self.doc {
-            let name = file_name(&d.path);
             let mut meta = Vec::new();
             if let Some((w, h)) = d.info.size {
                 meta.push(format!("{w}×{h}"));
@@ -1007,13 +1002,8 @@ impl App {
                 meta.push("no sound".into());
             }
             meta.push(split::timecode(d.info.duration));
-            let x = x + 18.0 * s;
-            let room = or.x - x - 16.0 * s;
-            c.line(x - 9.0 * s, cy - 9.0 * s, x - 9.0 * s, cy + 9.0 * s, 1.0 * s, t.separator);
-            let name = ellipsize(c.text, &name, 13.0 * s, room * 0.55);
-            let nw = c.text(x, cy + 5.0 * s, 13.0 * s, t.text, &name, Align::Left);
-            let meta = ellipsize(c.text, &meta.join("  ·  "), 12.0 * s, room - nw - 12.0 * s);
-            c.text(x + nw + 12.0 * s, cy + 4.5 * s, 12.0 * s, t.text_muted, &meta, Align::Left);
+            let meta = ellipsize(c.text, &meta.join("  ·  "), 12.0 * s, or.x - x - 16.0 * s);
+            c.text(x, cy + 4.5 * s, 12.0 * s, t.text_muted, &meta, Align::Left);
         }
     }
 
