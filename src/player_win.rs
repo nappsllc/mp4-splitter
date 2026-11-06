@@ -55,6 +55,8 @@ pub struct Source {
     /// The one decoder, shared by the still, the thumbnails and playback
     /// (one at a time: a hardware decoder holds a lot of memory).
     decoder: Arc<Decoder>,
+    /// Try the GPU first (tests turn it off, to check the software path too).
+    gpu: bool,
 }
 
 /// The decoder and where it has read to; dropped after a while unused.
@@ -86,6 +88,7 @@ impl Source {
             turn: info.turn,
             half: (5_000_000.0 / info.fps()) as i64,
             decoder: Arc::default(),
+            gpu: true,
         }
     }
 
@@ -94,7 +97,7 @@ impl Source {
         let mut g = self.decoder.slot.lock().unwrap_or_else(|e| e.into_inner());
         if g.v.is_none() {
             // On the GPU where it can be.
-            g.v = VideoReader::open(&self.path, true, self.turn).or_else(|_| VideoReader::open(&self.path, false, self.turn)).ok();
+            g.v = VideoReader::open(&self.path, self.gpu, self.turn).or_else(|_| VideoReader::open(&self.path, false, self.turn)).ok();
             g.at = None;
         }
         g.used = Some(Instant::now());
@@ -567,57 +570,71 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
 
-    fn fixture(ff: &Path, dir: &Path) -> PathBuf {
-        make(ff, dir, "src.mp4", "320x240")
-    }
-
-    fn make(ff: &Path, dir: &Path, name: &str, size: &str) -> PathBuf {
+    /// A video whose frames say which they are: eight blocks across, bright
+    /// or dark for the bits of the frame's number, on a colour that shows the
+    /// chroma plane is where it should be.
+    fn numbered(ff: &Path, dir: &Path, name: &str, (w, h): (u32, u32), seconds: u32) -> PathBuf {
         let p = dir.join(name);
+        let block = w / 8;
+        let video =
+            format!("color=c=black:s={w}x{h}:r=30:d={seconds},format=yuv420p,geq=lum='if(mod(floor(N/pow(2,floor(X/{block}))),2),200,40)':cb=90:cr=200");
         let ok = Command::new(ff)
-            .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", &format!("testsrc2=size={size}:rate=30:duration=4"), "-f", "lavfi", "-i"])
-            .args(["sine=frequency=440:duration=4", "-c:v", "libx264", "-g", "30", "-bf", "2", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest"])
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", &video, "-f", "lavfi", "-i"])
+            .arg(format!("sine=frequency=440:duration={seconds}"))
+            .args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "12", "-g", "30", "-bf", "2", "-c:a", "aac", "-shortest"])
+            .args(["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"])
             .arg(&p)
             .status()
             .unwrap()
             .success();
-        assert!(ok);
+        assert!(ok, "ffmpeg made no fixture");
         p
+    }
+
+    fn fixture(ff: &Path, dir: &Path) -> PathBuf {
+        numbered(ff, dir, "src.mp4", (320, 240), 4)
     }
 
     fn info(p: &Path) -> Info {
         crate::mp4::info(&mut std::io::BufReader::new(std::fs::File::open(p).unwrap())).unwrap()
     }
 
-    fn diff(a: &Picture, b: &Picture) -> f64 {
-        a.bgra.iter().zip(b.bgra.iter()).map(|(x, y)| (*x as i32 - *y as i32).unsigned_abs() as u64).sum::<u64>() as f64 / a.bgra.len() as f64
+    /// How bright a pixel of a BGRA picture is.
+    fn level(p: &Picture, x: u32, y: u32) -> i32 {
+        let i = (y as usize * p.w as usize + x as usize) * 4;
+        p.bgra[i] as i32 + p.bgra[i + 1] as i32 + p.bgra[i + 2] as i32
     }
 
-    /// Asked in any order, the picture is the one ffmpeg shows at that time,
-    /// and not its neighbour.
-    ///
-    /// For untagged HD, ffmpeg's converter assumes BT.601 and players (and
-    /// this app) BT.709, so the colours differ a little there even when the
-    /// decoding is right: a broken chroma plane differs by about 12.
-    fn check_frames(ff: &Path, p: &Path, size: (u32, u32)) {
-        let most = if size.1 >= 720 { 8.0 } else { 6.0 };
+    /// The number a picture shows.
+    fn number(p: &Picture) -> u32 {
+        let block = p.w / 8;
+        let levels: Vec<i32> = (0..8).map(|b| level(p, b * block + block / 2, p.h / 2)).collect();
+        let (lo, hi) = (*levels.iter().min().unwrap(), *levels.iter().max().unwrap());
+        // All one level: bit 7 is never set in these short clips, so it is dark.
+        levels.iter().enumerate().map(|(b, l)| u32::from(hi - lo > 60 && *l > (lo + hi) / 2) << b).sum()
+    }
+
+    /// Asked in any order, on the GPU and off it, each picture is exactly the
+    /// frame asked for: `first` is the number of the file's frame 0.
+    fn check_frames(ff: &Path, p: &Path, size: (u32, u32), first: u32) {
         let i = info(p);
-        let src = Source::new(p.to_path_buf(), &i);
-        let mut f = Finder::new(src.zero, src.half);
         let n = i.frames.len();
-        for k in [0, 1, 2, 40, 41, 40, 39, 38, 37, n / 2, n - 2, n - 1, 3] {
-            let t = i.frames[k];
-            let got = f.find(&src, t, size, || false).unwrap_or_else(|| panic!("{}: no picture for frame {k} of {n}", p.display()));
-            // ffmpeg stops at the edit list's end; a frame past it has nothing to compare with.
-            let Ok(want) = crate::ffmpeg::picture_at(ff, p, t, size.0, size.1, false) else { continue };
-            let d = diff(&got, &want);
-            assert!(d < most, "{}: frame {k}: differs by {d} from ffmpeg's", p.display());
-            for near in [k.wrapping_sub(1), k + 1] {
-                if near < n {
-                    if let Ok(other) = crate::ffmpeg::picture_at(ff, p, i.frames[near], size.0, size.1, false) {
-                        let e = diff(&got, &other);
-                        assert!(d < e, "{}: frame {k} looks more like frame {near}: {d} vs {e}", p.display());
-                    }
-                }
+        // What ffmpeg shows, for the record: it says which side a mismatch is on.
+        for k in [0, 1, 2] {
+            if let Ok(pic) = crate::ffmpeg::picture_at(ff, p, i.frames[k], size.0, size.1, false) {
+                eprintln!("{}: ffmpeg at frame {k} shows number {}", p.display(), number(&pic));
+            }
+        }
+        for gpu in [true, false] {
+            let mut src = Source::new(p.to_path_buf(), &i);
+            src.gpu = gpu;
+            let mut f = Finder::new(src.zero, src.half);
+            // The first frames, stepping back through and past what stays
+            // decoded, a jump, and to the end.
+            for k in [0, 1, 2, 40, 41, 40, 39, 38, 37, 25, 24, n / 2, n - 2, 3, 0] {
+                let got = f.find(&src, i.frames[k], size, || false).unwrap_or_else(|| panic!("{} (gpu {gpu}): no picture for frame {k} of {n}", p.display()));
+                assert_eq!((got.w, got.h), size);
+                assert_eq!(number(&got), first + k as u32, "{} (gpu {gpu}): frame {k}", p.display());
             }
         }
     }
@@ -628,25 +645,44 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("mp4s-stills-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let src = fixture(&ff, &dir);
-        check_frames(&ff, &src, (320, 240));
+        check_frames(&ff, &src, (320, 240), 0);
         let cut = dir.join("cut.mp4");
         let mut r = std::io::BufReader::new(std::fs::File::open(&src).unwrap());
         let mut w = std::io::BufWriter::new(std::fs::File::create(&cut).unwrap());
         crate::mp4::trim(&mut r, &mut w, Duration::from_secs_f64(0.5), Duration::from_secs_f64(3.5)).unwrap();
         drop(w);
-        check_frames(&ff, &cut, (320, 240));
+        check_frames(&ff, &cut, (320, 240), 15);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Decoder surfaces are taller than 1080 rows: the colours stay right,
-    /// the top rows too.
+    /// Decoder surfaces are taller than 1080 rows: the frames stay exact and
+    /// the colours right, in the top rows too, on the GPU and off it.
     #[test]
     fn stills_are_right_at_1080p() {
         let Some(ff) = crate::ffmpeg::find() else { return };
         let dir = std::env::temp_dir().join(format!("mp4s-1080-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let src = make(&ff, &dir, "hd.mp4", "1920x1080");
-        check_frames(&ff, &src, (1920, 1080));
+        let src = numbered(&ff, &dir, "hd.mp4", (1920, 1080), 2);
+        check_frames(&ff, &src, (1920, 1080), 0);
+        let i = info(&src);
+        for gpu in [true, false] {
+            let mut s = Source::new(src.clone(), &i);
+            s.gpu = gpu;
+            let mut f = Finder::new(s.zero, s.half);
+            let pic = f.find(&s, i.frames[5], (1920, 1080), || false).unwrap();
+            // Frame 5: blocks 0 and 2 bright. Same colour at the top, middle and bottom.
+            let at = |y: u32| {
+                let k = ((y * 1920 + 120) * 4) as usize;
+                [pic.bgra[k] as i32, pic.bgra[k + 1] as i32, pic.bgra[k + 2] as i32]
+            };
+            for y in [2, 8, 300, 1070] {
+                let (a, b) = (at(y), at(540));
+                assert!(a.iter().zip(&b).all(|(p, q)| (p - q).abs() <= 8), "gpu {gpu}: row {y} is {a:?}, the middle {b:?}");
+            }
+            // BT.709 for Y 200, Cb 90, Cr 200: red well above blue.
+            let [b, g, r] = at(540);
+            assert!(r > g && r - b > 60, "gpu {gpu}: {b}, {g}, {r}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
