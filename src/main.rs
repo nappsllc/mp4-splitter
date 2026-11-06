@@ -20,6 +20,7 @@ mod export;
 mod ffmpeg;
 #[allow(dead_code)]
 mod fonts;
+mod http;
 mod links;
 #[cfg(windows)]
 mod mf;
@@ -37,11 +38,15 @@ mod player;
 mod plural;
 #[allow(dead_code)]
 mod raster;
+mod sha256;
 mod shell;
 mod split;
 mod theme;
 #[allow(dead_code)]
 mod uifb;
+mod update;
+mod update_install;
+mod update_ui;
 #[cfg(windows)]
 #[path = "shell_win.rs"]
 mod window;

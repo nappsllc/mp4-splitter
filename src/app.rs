@@ -14,8 +14,12 @@ use crate::shell::{Button, CursorKind, Host, Key, MIN_CLIENT, Mods, Tick, Wake};
 use crate::split::{self, Marker, Plan};
 use crate::theme::{self, Theme};
 use crate::uifb::Fb;
+use crate::update::{self, InstallKind, Release};
+use crate::update_ui::{Btn, Do, In, Machine, Screen};
 use std::cell::Cell;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -37,6 +41,9 @@ const OVER: u8 = 16;
 
 /// The corners of the preview and the picture in it, in logical pixels.
 const PREVIEW_RADIUS: f32 = 12.0;
+
+/// The update prompt's width, in logical pixels.
+const UPDATE_W: f32 = 620.0;
 
 /// What a file dialog came back with, waiting for the app's thread.
 enum Dialog {
@@ -81,6 +88,12 @@ enum Act {
     FitWindow,
     /// The language picker's item: 0 the system's, then each language.
     Language(usize),
+    /// A button of the update prompt.
+    Update(crate::update_ui::Btn),
+    /// Look for a new version now.
+    CheckUpdates,
+    /// The daily check on or off.
+    AutoCheck,
 }
 
 /// A page over the window.
@@ -88,6 +101,22 @@ enum Act {
 enum Page {
     About,
     Settings,
+    Update,
+}
+
+/// The update prompt and what goes with it.
+#[derive(Default)]
+struct Updates {
+    /// The prompt's state, while it shows or works.
+    machine: Option<Machine>,
+    /// What the workers said, waiting for the app's thread.
+    inbox: Arc<Mutex<VecDeque<In>>>,
+    /// What the daily check found, until the moment is right to say so.
+    offer: Arc<Mutex<Option<Release>>>,
+    /// Tells the running download to stop.
+    cancel: Arc<AtomicBool>,
+    /// The version swapped in, and the exe it is at: it runs from the next start.
+    installed: Option<(Release, PathBuf)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -218,6 +247,7 @@ pub struct App {
     drop_hover: bool,
     /// Quit after this long (tests and screenshots).
     autoclose: Option<Instant>,
+    updates: Updates,
 }
 
 impl App {
@@ -267,11 +297,18 @@ impl App {
             exporting: None,
             drop_hover: false,
             autoclose,
+            updates: Updates::default(),
         };
         if let Some(p) = open {
             app.open(&p);
         }
         app.redraw();
+        crate::update_install::cleanup_previous();
+        let (offer, wake) = (app.updates.offer.clone(), app.wake());
+        crate::update::spawn_checker(move |r| {
+            *offer.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+            wake();
+        });
         app
     }
 
@@ -737,8 +774,118 @@ impl App {
                 self.settings_changed();
             }
             Act::AboutLink => crate::links::open(crate::links::POWERNAPPS),
+            Act::Update(b) => {
+                // The old exe can't be restarted over a running export.
+                if b != Btn::Restart || self.exporting.is_none() {
+                    self.update_event(In::Click(b));
+                }
+            }
+            Act::CheckUpdates => self.check_updates(),
+            Act::AutoCheck => {
+                self.config.check_updates = !self.config.check_updates;
+                self.config.save();
+            }
         }
         self.redraw();
+    }
+
+    /// The user asks whether there's a new version.
+    fn check_updates(&mut self) {
+        let kind = update::detect_install();
+        let (machine, acts) = if let InstallKind::Store(store) = kind {
+            (Machine::managed(store), Vec::new())
+        } else if let Some((rel, _)) = &self.updates.installed {
+            (Machine::ready(rel.clone()), Vec::new())
+        } else {
+            Machine::checking(kind != InstallKind::Portable)
+        };
+        self.updates.machine = Some(machine);
+        self.page = Some(Page::Update);
+        self.update_do(acts);
+    }
+
+    /// Something happened that the update prompt should know.
+    fn update_event(&mut self, ev: In) {
+        let Some(m) = &mut self.updates.machine else { return };
+        let acts = m.on(ev);
+        self.update_do(acts);
+        self.redraw();
+    }
+
+    fn update_do(&mut self, acts: Vec<Do>) {
+        for a in acts {
+            match a {
+                Do::Close => {
+                    self.updates.machine = None;
+                    if self.page == Some(Page::Update) {
+                        self.page = None;
+                    }
+                }
+                Do::Check => self.update_worker(|| In::Checked(update::check_now())),
+                Do::Download(rel) => {
+                    self.updates.cancel.store(false, Ordering::SeqCst);
+                    let (cancel, inbox, wake) = (self.updates.cancel.clone(), self.updates.inbox.clone(), self.wake());
+                    self.update_worker(move || {
+                        let progress = |got, total| {
+                            inbox.lock().unwrap_or_else(|e| e.into_inner()).push_back(In::Progress(got, total));
+                            wake();
+                            !cancel.load(Ordering::SeqCst)
+                        };
+                        In::Fetched(crate::update_install::install(&rel, &progress))
+                    });
+                }
+                Do::Cancel => self.updates.cancel.store(true, Ordering::SeqCst),
+                Do::Skip(v) => {
+                    self.config.skip_version = v;
+                    self.config.save();
+                }
+                Do::OpenPage => crate::links::open(crate::links::RELEASES),
+                Do::Restart => {
+                    let exe = self.updates.installed.as_ref().map(|(_, e)| e.clone());
+                    let open = self.doc.as_ref().map(|d| d.path.clone());
+                    self.update_worker(move || {
+                        In::Restarted(exe.ok_or_else(|| "nothing to restart".to_string()).and_then(|e| crate::update_install::restart(&e, open.as_deref())))
+                    });
+                }
+                Do::Installed(rel, exe) => self.updates.installed = Some((rel, exe)),
+                Do::Uninstalled => self.updates.installed = None,
+                Do::Quit => self.quit = true,
+            }
+        }
+    }
+
+    /// Run `work` on a thread of its own; what it says comes back to the prompt.
+    fn update_worker(&self, work: impl FnOnce() -> In + Send + 'static) {
+        let (inbox, wake) = (self.updates.inbox.clone(), self.wake());
+        std::thread::spawn(move || {
+            let ev = work();
+            inbox.lock().unwrap_or_else(|e| e.into_inner()).push_back(ev);
+            wake();
+        });
+    }
+
+    /// What the workers and the daily check have said. The daily check's news
+    /// waits for a quiet moment, and is dropped once a version is in place.
+    fn update_poll(&mut self) {
+        loop {
+            let ev = self.updates.inbox.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
+            let Some(ev) = ev else { break };
+            self.update_event(ev);
+        }
+        let busy = self.page.is_some()
+            || self.playing.is_some()
+            || self.drag.is_some()
+            || self.pressed.is_some()
+            || self.exporting.is_some()
+            || self.updates.machine.is_some();
+        if !busy {
+            let offer = self.updates.offer.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some(rel) = offer.filter(|_| self.updates.installed.is_none()) {
+                self.updates.machine = Some(Machine::offer(rel, update::detect_install() != InstallKind::Portable));
+                self.page = Some(Page::Update);
+                self.redraw();
+            }
+        }
     }
 
     /// Size the window to the video. Not when maximized: its size is the screen's then.
@@ -797,6 +944,20 @@ impl App {
 
     /// A key went down.
     pub fn on_key(&mut self, key: Key) {
+        // The update prompt keeps the keyboard while it shows.
+        if self.page == Some(Page::Update) {
+            match key {
+                Key::Escape => self.update_event(In::Dismiss),
+                Key::Enter => {
+                    let restart = self.updates.machine.as_ref().is_some_and(|m| m.buttons().first() == Some(&Btn::Restart));
+                    if !restart || self.exporting.is_none() {
+                        self.update_event(In::Enter);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
         if key == Key::F1 {
             return self.act(Act::About);
         }
@@ -879,7 +1040,7 @@ impl App {
             if button == Button::Left {
                 if let Some(a) = self.hit(x, y) {
                     self.pressed = Some(a);
-                } else if !self.page_rect(page).contains(x, y) {
+                } else if page != Page::Update && !self.page_rect(page).contains(x, y) {
                     self.page = None;
                 }
                 self.redraw();
@@ -1179,6 +1340,7 @@ impl App {
         match self.page {
             Some(Page::About) => self.draw_about(c),
             Some(Page::Settings) => self.draw_settings(c),
+            Some(Page::Update) => self.draw_update(c),
             None => self.draw_tooltip(c),
         }
         if self.drop_hover {
@@ -1757,7 +1919,8 @@ impl App {
         let (w, h) = match page {
             // Its one-line description, with margins.
             Page::About => (Text::new().measure(tr!("about.line"), 13.0 * s) + 64.0 * s, 296.0 * s),
-            Page::Settings => (680.0 * s, (166.0 + 28.0 * crate::i18n::languages().count().div_ceil(4).max(1) as f32 + 28.0 + 20.0) * s),
+            Page::Update => (UPDATE_W * s, self.update_height() * s),
+            Page::Settings => (680.0 * s, (216.0 + 28.0 * crate::i18n::languages().count().div_ceil(4).max(1) as f32 + 28.0 + 20.0) * s),
         };
         Rect::new((self.l.w - w) / 2.0, (self.l.h - h) / 2.0, w, h)
     }
@@ -1828,6 +1991,21 @@ impl App {
             self.hits.push((self.on_screen(sw), Act::Accent(i), "", OVER));
             x += d + 8.0 * s;
         }
+        // Updates: yours to switch, unless a store sees to them.
+        let y = y + 50.0 * s;
+        c.text(left, y + 21.0 * s, 13.0 * s, t.text_muted, tr!("settings.updates"), Align::Left);
+        let x = r.x + 120.0 * s;
+        if let InstallKind::Store(store) = update::detect_install() {
+            c.text(x, y + 21.0 * s, 13.0 * s, t.text, &tr!("update.managed", store = store), Align::Left);
+        } else {
+            let label = tr!("settings.check_auto");
+            let w = c.text.measure(label, 13.0 * s) + 24.0 * s;
+            let style = if self.config.check_updates { Style::On } else { Style::Secondary };
+            self.button(c, Rect::new(x, y, w, 32.0 * s), Act::AutoCheck, "", None, Some(label), style);
+            let now = tr!("update.check");
+            let nw = c.text.measure(now, 13.0 * s) + 24.0 * s;
+            self.button(c, Rect::new(x + w + 6.0 * s, y, nw, 32.0 * s), Act::CheckUpdates, "", None, Some(now), Style::Secondary);
+        }
         // Language: the system's, then each in itself.
         let y = y + 54.0 * s;
         c.text(left, y, 13.0 * s, t.text_muted, tr!("settings.language"), Align::Left);
@@ -1851,7 +2029,23 @@ impl App {
         c.rrect(mr, 18.0 * s, t.accent);
         c.icon(Icon::Scissors, mr.inset(14.0 * s, 14.0 * s), t.on_accent);
         c.text(cx, mr.bottom() + 36.0 * s, 22.0 * s, t.text, crate::APP_NAME, Align::Center);
-        c.text(cx, mr.bottom() + 58.0 * s, 13.0 * s, t.text_muted, &tr!("about.version", version = env!("CARGO_PKG_VERSION")), Align::Center);
+        // The version, and where this install can look for a newer one.
+        let version = tr!("about.version", version = env!("CARGO_PKG_VERSION"));
+        if matches!(update::detect_install(), InstallKind::Store(_)) {
+            c.text(cx, mr.bottom() + 58.0 * s, 13.0 * s, t.text_muted, &version, Align::Center);
+        } else {
+            let check = tr!("update.check");
+            let (vw, kw) = (c.text.measure(&version, 13.0 * s), c.text.measure(check, 13.0 * s));
+            let (vx, y) = (cx - (vw + 14.0 * s + kw) / 2.0, mr.bottom() + 58.0 * s);
+            c.text(vx, y, 13.0 * s, t.text_muted, &version, Align::Left);
+            let lx = vx + vw + 14.0 * s;
+            c.text(lx, y, 13.0 * s, t.accent, check, Align::Left);
+            let hit = Rect::new(lx - 4.0 * s, y - 15.0 * s, kw + 8.0 * s, 22.0 * s);
+            if hit.contains(self.mouse.0, self.mouse.1) {
+                c.rect(Rect::new(lx, y + 3.0 * s, kw, 1.0 * s), t.accent);
+            }
+            self.hits.push((hit, Act::CheckUpdates, "", OVER));
+        }
         c.text(cx, mr.bottom() + 88.0 * s, 13.0 * s, t.text, tr!("about.line"), Align::Center);
         let sep = mr.bottom() + 106.0 * s;
         c.rect(Rect::new(r.x + 24.0 * s, sep, r.w - 48.0 * s, 1.0 * s), t.separator);
@@ -1878,6 +2072,127 @@ impl App {
         c.ring(fx + rad, fy - 4.0 * s, rad, 0.9 * s, t.text_faint);
         c.text(fx + rad, fy - 1.0 * s, 8.5 * s, t.text_faint, "c", Align::Center);
         c.text(fx + 2.0 * rad + 5.0 * s, fy, px, t.text_faint, foot, Align::Left);
+    }
+
+    /// The update prompt's height, in logical pixels: the notes make it taller.
+    fn update_height(&self) -> f32 {
+        match self.updates.machine.as_ref().map(|m| &m.screen) {
+            Some(Screen::Available(_)) => 360.0,
+            Some(Screen::Failed { .. } | Screen::CheckFailed(_)) => 220.0,
+            _ => 190.0,
+        }
+    }
+
+    fn draw_update(&mut self, c: &mut Canvas) {
+        let t = self.theme;
+        let s = self.l.s;
+        let r = self.draw_page(c, Page::Update);
+        let Some(m) = self.updates.machine.clone() else { return };
+        let cx = r.cx();
+        let current = env!("CARGO_PKG_VERSION");
+        let (title, y0) = (r.y + 46.0 * s, r.y + 76.0 * s);
+        let width = r.w - 56.0 * s;
+        let line = |c: &mut Canvas, text: &str, y: f32, col| {
+            let text = ellipsize(c.text, text, 13.0 * s, width);
+            c.text(cx, y, 13.0 * s, col, &text, Align::Center);
+        };
+        let head = |c: &mut Canvas, text: &str| {
+            let text = ellipsize(c.text, text, 17.0 * s, width);
+            c.text(cx, title, 17.0 * s, t.text, &text, Align::Center);
+        };
+        match &m.screen {
+            Screen::Checking => head(c, tr!("update.checking")),
+            Screen::Available(rel) => {
+                head(c, &tr!("update.available", version = rel.version.as_str(), current = current));
+                self.update_notes(c, Rect::new(r.x + 28.0 * s, y0 - 6.0 * s, width, 216.0 * s), &rel.notes);
+            }
+            Screen::UpToDate => {
+                head(c, tr!("update.up_to_date"));
+                line(c, &tr!("update.latest", current = current), y0, t.text_muted);
+            }
+            Screen::Managed(store) => {
+                head(c, &format!("{} {current}", crate::APP_NAME));
+                line(c, &tr!("update.managed", store = *store), y0, t.text_muted);
+            }
+            Screen::CheckFailed(e) => {
+                head(c, tr!("update.check_failed"));
+                self.update_error(c, Rect::new(r.x + 28.0 * s, y0 - 14.0 * s, width, 60.0 * s), e);
+            }
+            Screen::Downloading { got, total, .. } => {
+                let done = format!("{:.1} MB", *got as f64 / 1_048_576.0);
+                head(c, &tr!("update.downloading_n", got = done.as_str()));
+                let bar = Rect::new(r.x + 28.0 * s, y0, width, 8.0 * s);
+                c.rrect(bar, 4.0 * s, t.separator);
+                if let Some(total) = total.filter(|&n| n > 0) {
+                    let f = (*got as f32 / total as f32).clamp(0.0, 1.0);
+                    c.rrect(Rect::new(bar.x, bar.y, (bar.w * f).max(8.0 * s), bar.h), 4.0 * s, t.accent);
+                }
+            }
+            Screen::Verifying(_) => head(c, tr!("update.verifying")),
+            Screen::Cancelling(_) => head(c, tr!("update.cancelling")),
+            Screen::Ready(rel) => {
+                head(c, &tr!("update.ready", version = rel.version.as_str()));
+                let note = if self.exporting.is_some() {
+                    tr!("update.wait_export")
+                } else if self.doc.as_ref().is_some_and(|d| !d.plan.cuts.is_empty()) {
+                    tr!("update.lose_cuts")
+                } else {
+                    tr!("update.ready_note")
+                };
+                line(c, note, y0, t.text_muted);
+            }
+            Screen::Restarting(_) => head(c, tr!("update.restarting")),
+            Screen::Failed { rel, msg } => {
+                head(c, &tr!("update.install_failed_title", version = rel.version.as_str()));
+                self.update_error(c, Rect::new(r.x + 28.0 * s, y0 - 14.0 * s, width, 60.0 * s), msg);
+            }
+        }
+        // The buttons, side by side in the middle, the first the main one.
+        let labels: Vec<(Btn, &str)> = m.buttons().iter().map(|&b| (b, b.label(m.page_only()))).collect();
+        let widths: Vec<f32> = labels.iter().map(|(_, l)| c.text.measure(l, 13.0 * s) + 32.0 * s).collect();
+        let total: f32 = widths.iter().sum::<f32>() + 8.0 * s * labels.len().saturating_sub(1) as f32;
+        let mut x = cx - total / 2.0;
+        let y = r.bottom() - 54.0 * s;
+        for (i, ((b, label), w)) in labels.iter().zip(&widths).enumerate() {
+            let style = if i == 0 && *b != Btn::Cancel && *b != Btn::Ok { Style::Primary } else { Style::Secondary };
+            self.button(c, Rect::new(x, y, *w, 34.0 * s), Act::Update(*b), "", None, Some(label), style);
+            x += w + 8.0 * s;
+        }
+    }
+
+    /// The release notes, wrapped; what doesn't fit ends in an ellipsis.
+    fn update_notes(&self, c: &mut Canvas, r: Rect, notes: &str) {
+        let t = self.theme;
+        let s = self.l.s;
+        c.rrect(r, 8.0 * s, t.separator.with_alpha(60));
+        let (px, row) = (12.5 * s, 18.0 * s);
+        let inner = r.inset(12.0 * s, 10.0 * s);
+        let parsed = update::notes_lines(notes, 40);
+        if parsed.is_empty() {
+            c.text(r.cx(), r.cy() + 4.0 * s, px, t.text_faint, tr!("update.no_notes"), Align::Center);
+            return;
+        }
+        let text = &*c.text;
+        let mut measure = |l: &str| text.measure(l, px);
+        let lines: Vec<(String, bool)> =
+            parsed.iter().flat_map(|(l, head)| update::wrap(l, inner.w, &mut measure).into_iter().map(|w| (w, *head)).collect::<Vec<_>>()).collect();
+        let fit = (inner.h / row) as usize;
+        for (i, (l, head)) in lines.iter().take(fit).enumerate() {
+            let more = i + 1 == fit && lines.len() > fit;
+            let l = if more { format!("{l}…") } else { l.clone() };
+            c.text(inner.x, inner.y + row * (i as f32 + 0.75), px, if *head { t.text } else { t.text_muted }, &ellipsize(c.text, &l, px, inner.w), Align::Left);
+        }
+    }
+
+    /// Why it failed, wrapped and centred.
+    fn update_error(&self, c: &mut Canvas, r: Rect, e: &str) {
+        let s = self.l.s;
+        let px = 12.5 * s;
+        let text = &*c.text;
+        let mut measure = |l: &str| text.measure(l, px);
+        for (i, l) in update::wrap(e, r.w, &mut measure).iter().take(3).enumerate() {
+            c.text(r.cx(), r.y + 18.0 * s * (i as f32 + 0.75), px, self.theme.text_muted, &ellipsize(c.text, l, px, r.w), Align::Center);
+        }
     }
 
     fn draw_tooltip(&mut self, c: &mut Canvas) {
@@ -2187,6 +2502,7 @@ impl App {
 
     /// Between events: playback moves on. When to come back, and whether to quit.
     pub fn tick(&mut self) -> Tick {
+        self.update_poll();
         if self.quit {
             return Tick { wait: None, exit: true };
         }
@@ -2302,6 +2618,51 @@ mod tests {
 
     /// Windows asks for a paint whenever the window is uncovered, with nothing
     /// new to draw: what can be clicked must stay.
+    /// The daily check's news: not over playing, dragging or another page; then once.
+    #[test]
+    fn the_daily_check_waits_for_a_quiet_moment() {
+        let mut a = App::new(Box::new(NoWindow), Some(true), None);
+        *a.updates.offer.lock().unwrap() = Some(Release { version: "9.9.9".into(), ..Default::default() });
+        a.page = Some(Page::About);
+        a.update_poll();
+        assert!(a.updates.machine.is_none(), "another page is showing");
+        a.page = None;
+        a.pressed = Some(Act::Play);
+        a.update_poll();
+        assert!(a.updates.machine.is_none(), "mid-click");
+        a.pressed = None;
+        a.update_poll();
+        assert_eq!(a.page, Some(Page::Update));
+        assert!(matches!(a.updates.machine.as_ref().unwrap().screen, Screen::Available(_)));
+        // Enter does nothing here; Esc lets it go until tomorrow's check.
+        a.on_key(Key::Enter);
+        assert!(matches!(a.updates.machine.as_ref().unwrap().screen, Screen::Available(_)));
+        a.on_key(Key::Char(' '));
+        a.on_key(Key::F1);
+        assert_eq!(a.page, Some(Page::Update), "the prompt keeps the keyboard");
+        a.on_key(Key::Escape);
+        assert_eq!(a.page, None);
+        assert!(a.updates.machine.is_none());
+    }
+
+    /// Once a version is in place, the check doesn't offer it again, and restarting
+    /// waits for a running export.
+    #[test]
+    fn a_version_in_place_is_not_offered_again() {
+        let mut a = App::new(Box::new(NoWindow), Some(true), None);
+        let rel = Release { version: "9.9.9".into(), ..Default::default() };
+        a.updates.installed = Some((rel.clone(), PathBuf::from("x.exe")));
+        *a.updates.offer.lock().unwrap() = Some(rel.clone());
+        a.update_poll();
+        assert!(a.updates.machine.is_none() && a.page.is_none());
+        a.check_updates();
+        assert_eq!(a.updates.machine.as_ref().unwrap().screen, Screen::Ready(rel.clone()));
+        a.exporting = Some(Arc::default());
+        a.act(Act::Update(Btn::Restart));
+        a.on_key(Key::Enter);
+        assert_eq!(a.updates.machine.as_ref().unwrap().screen, Screen::Ready(rel), "not during an export");
+    }
+
     #[test]
     fn a_paint_with_nothing_to_draw_keeps_every_control() {
         let mut app = App::new(Box::new(NoWindow), Some(true), None);

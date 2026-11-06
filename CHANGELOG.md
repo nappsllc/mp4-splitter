@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Updates:** once a day the app asks GitHub whether there is a newer release, and offers it with its notes. The Windows exe downloads it, checks it against the release's `SHA256SUMS.txt`, swaps itself and restarts when you say so; a new version that won't start is swapped back. macOS and Linux open the download page. Turn the daily check off in Settings; **Check for updates** is in Settings and About. The request says only which app and version is asking.
+
 ## 0.1.1
 
 - The app is now called **PowerNapps MP4 Splitter**. Nothing else changes: the file names, your settings and links stay as they were.
