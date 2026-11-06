@@ -2,7 +2,7 @@
 //! Linux, until they are ported to hand-rolled layers as Windows is).
 
 use crate::app::App;
-use crate::shell::{Button, CursorKind, Host, Key, Mods, Picked, Wake};
+use crate::shell::{Button, CursorKind, Host, Key, MIN_CLIENT, Mods, Picked, START_CLIENT, Wake};
 use crate::theme::Theme;
 use std::num::NonZeroU32;
 use std::path::PathBuf;
@@ -33,6 +33,21 @@ impl Host for WinitHost {
 
     fn scale(&self) -> f32 {
         self.window.scale_factor() as f32
+    }
+
+    fn max_client(&self) -> (u32, u32) {
+        // Winit doesn't say what the taskbar or menu bar take: allow for them
+        // and the title bar.
+        let margin = (96.0 * self.window.scale_factor()) as u32;
+        self.window.current_monitor().map_or_else(|| self.size(), |m| (m.size().width.saturating_sub(margin), m.size().height.saturating_sub(margin)))
+    }
+
+    fn maximized(&self) -> bool {
+        self.window.is_maximized()
+    }
+
+    fn resize_client(&self, w: u32, h: u32) {
+        let _ = self.window.request_inner_size(winit::dpi::PhysicalSize::new(w, h));
     }
 
     fn redraw(&self, _rows: Option<(u32, u32)>) {
@@ -115,8 +130,8 @@ impl ApplicationHandler<UserEvent> for Shell {
         }
         let attrs = Window::default_attributes()
             .with_title("MP4 Splitter")
-            .with_inner_size(LogicalSize::new(1180.0, 780.0))
-            .with_min_inner_size(LogicalSize::new(760.0, 560.0));
+            .with_inner_size(LogicalSize::new(START_CLIENT.0 as f64, START_CLIENT.1 as f64))
+            .with_min_inner_size(LogicalSize::new(MIN_CLIENT.0 as f64, MIN_CLIENT.1 as f64));
         let window = match el.create_window(attrs) {
             Ok(w) => Rc::new(w),
             Err(e) => {

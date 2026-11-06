@@ -41,7 +41,7 @@ without re-encoding.** Windows, macOS and Linux. Apache-2.0.
 - **Dark and light themes** that follow your OS, or your choice in Settings,
   with Rustshot's design tokens, its accent colours and the Inter font. Everything is drawn by the app itself (no GUI
   toolkit, no web view). On Windows it is hand-rolled on the OS's own APIs, like
-  Rustshot, and the release build is about 0.6 MB.
+  Rustshot, and the release build is about 0.7 MB.
 
 ![The light theme](docs/splitter-light.png)
 
@@ -63,6 +63,8 @@ without re-encoding.** Windows, macOS and Linux. Apache-2.0.
 | <kbd>N</kbd> | Snap to key frames |
 | <kbd>M</kbd> | Mute |
 | <kbd>+</kbd> <kbd>-</kbd> <kbd>\</kbd> | Zoom in / out / show everything |
+| <kbd>Ctrl</kbd>+<kbd>1</kbd> | Window to the video's actual size (or as large as fits) |
+| <kbd>Ctrl</kbd>+<kbd>0</kbd> | Fit the window to the video, removing the black bars |
 | <kbd>F1</kbd> | About |
 | <kbd>Ctrl</kbd>+<kbd>,</kbd> | Settings |
 | <kbd>Ctrl</kbd>+<kbd>O</kbd> | Open (or drop a file on the window) |
