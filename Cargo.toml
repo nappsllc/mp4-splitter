@@ -1,0 +1,28 @@
+[package]
+name = "mp4-splitter"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Tiny, good-looking, cross-platform tool that splits MP4 videos losslessly"
+repository = "https://github.com/nappsllc/mp4-splitter"
+rust-version = "1.85"
+
+[[bin]]
+name = "mp4-splitter"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+ab_glyph = "0.2"
+tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd", "png-format"] }
+winit = "0.30"
+softbuffer = "0.4"
+cpal = "0.15"
+rfd = "0.15"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+opt-level = "z"
+panic = "abort"
