@@ -25,6 +25,15 @@ pub struct Lang {
 include!(concat!(env!("OUT_DIR"), "/lang_table.rs"));
 static PACKED: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/lang.z"));
 
+/// Every language in the app and a way to read its strings, whatever is showing.
+#[cfg(test)]
+pub fn all_strings() -> impl Iterator<Item = (&'static str, impl Fn(&str) -> String)> {
+    LANGS.iter().map(|l| {
+        let strings = parse(text_of(l)).0;
+        (l.tag, move |k: &str| strings.get(k).cloned().unwrap_or_default().to_string())
+    })
+}
+
 /// The languages that can be shown here, English among them.
 pub fn languages() -> impl Iterator<Item = &'static Lang> {
     LANGS.iter().filter(|l| usable(l))

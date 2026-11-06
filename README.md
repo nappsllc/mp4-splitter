@@ -41,7 +41,12 @@ without re-encoding.** Windows, macOS and Linux. Apache-2.0.
 - **Dark and light themes** that follow your OS, or your choice in Settings,
   with Rustshot's design tokens, its accent colours and the Inter font. Everything is drawn by the app itself (no GUI
   toolkit, no web view). On Windows it is hand-rolled on the OS's own APIs, like
-  Rustshot, and the release build is about 0.7 MB.
+  Rustshot, and the release build is about 0.8 MB.
+- **Updates**: once a day it asks GitHub whether there's a newer release (the
+  request says only which app and version is asking; turn it off in Settings).
+  The Windows exe checks the new version against the release's `SHA256SUMS.txt`,
+  swaps itself and restarts when you say so; a version that won't start is
+  swapped back. macOS and Linux open the download page.
 
 ![The light theme](docs/splitter-light.png)
 

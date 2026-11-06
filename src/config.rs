@@ -12,13 +12,23 @@ pub enum ThemeChoice {
     Light,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     pub theme: ThemeChoice,
     /// Which accent ([`crate::theme::ACCENTS`]): 0 is the theme's own.
     pub accent: usize,
     /// A language tag, or empty to follow the OS.
     pub language: String,
+    /// Look for a new version once a day.
+    pub check_updates: bool,
+    /// The version the user chose to skip (the daily check doesn't offer it).
+    pub skip_version: String,
+}
+
+impl Default for Config {
+    fn default() -> Config {
+        Config { theme: ThemeChoice::default(), accent: 0, language: String::new(), check_updates: true, skip_version: String::new() }
+    }
 }
 
 impl Config {
@@ -37,6 +47,8 @@ impl Config {
                 }
                 "accent" => c.accent = v.parse().unwrap_or(0),
                 "language" => c.language = v.to_string(),
+                "check_updates" => c.check_updates = v != "false",
+                "skip_version" => c.skip_version = v.to_string(),
                 _ => {}
             }
         }
@@ -49,7 +61,10 @@ impl Config {
             ThemeChoice::Dark => "dark",
             ThemeChoice::Light => "light",
         };
-        format!("theme = {theme}\naccent = {}\nlanguage = {}\n", self.accent, self.language)
+        format!(
+            "theme = {theme}\naccent = {}\nlanguage = {}\ncheck_updates = {}\nskip_version = {}\n",
+            self.accent, self.language, self.check_updates, self.skip_version
+        )
     }
 
     /// What is saved, or the defaults.
@@ -67,6 +82,11 @@ impl Config {
             eprintln!("settings: {e}");
         }
     }
+}
+
+/// The folder the settings are in.
+pub fn dir() -> Option<PathBuf> {
+    path()?.parent().map(PathBuf::from)
 }
 
 /// `MP4_SPLITTER_CONFIG` first (tests), then the OS's place for it.
@@ -91,7 +111,7 @@ mod tests {
 
     #[test]
     fn settings_round_trip() {
-        let c = Config { theme: ThemeChoice::Light, accent: 2, language: "pt-BR".into() };
+        let c = Config { theme: ThemeChoice::Light, accent: 2, language: "pt-BR".into(), check_updates: false, skip_version: "0.2.0".into() };
         assert_eq!(Config::parse(&c.to_text()), c);
     }
 
@@ -99,6 +119,14 @@ mod tests {
     fn what_is_missing_or_unknown_is_the_default() {
         assert_eq!(Config::parse(""), Config::default());
         let c = Config::parse("theme = purple\naccent = many\nnonsense\nfuture = 1\nlanguage = de");
-        assert_eq!(c, Config { theme: ThemeChoice::System, accent: 0, language: "de".into() });
+        assert_eq!(c, Config { language: "de".into(), ..Config::default() });
+    }
+
+    #[test]
+    fn the_update_check_is_on_unless_turned_off() {
+        assert!(Config::default().check_updates, "default on");
+        assert!(Config::parse("theme = dark").check_updates, "a settings file from before it existed");
+        assert!(!Config::parse("check_updates = false").check_updates);
+        assert!(Config::parse("check_updates = true").check_updates);
     }
 }

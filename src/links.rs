@@ -4,8 +4,11 @@
 /// change without an app update.
 pub const POWERNAPPS: &str = "https://powernapps.net/r/mp4-splitter";
 
+/// Where the newest version is.
+pub const RELEASES: &str = "https://github.com/nappsllc/mp4-splitter/releases/latest";
+
 /// The only URLs [`open`] opens.
-const LINKS: [&str; 1] = [POWERNAPPS];
+const LINKS: [&str; 2] = [POWERNAPPS, RELEASES];
 
 fn allowed(url: &str) -> bool {
     LINKS.contains(&url)
@@ -40,6 +43,7 @@ mod tests {
     fn only_the_listed_page_opens() {
         assert_eq!(POWERNAPPS, "https://powernapps.net/r/mp4-splitter");
         assert!(allowed(POWERNAPPS));
+        assert!(allowed(RELEASES));
         assert!(!allowed("https://example.com"));
         assert!(!allowed("https://powernapps.net/r/mp4-splitter/../other"));
     }
