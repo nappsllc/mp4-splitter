@@ -28,7 +28,7 @@ without re-encoding.** Windows, macOS and Linux. Apache-2.0.
   with the keyboard.
 - **Dark and light themes** that follow your OS, with Rustshot's design
   tokens and the Inter font. Everything is drawn by the app itself (no GUI
-  toolkit, no web view); the release build is about 5 MB.
+  toolkit, no web view); the release build is about 3.5 MB.
 
 ![The light theme](docs/splitter-light.png)
 
