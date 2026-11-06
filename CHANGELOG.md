@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.1
+
+- The app is now called **PowerNapps MP4 Splitter**. Nothing else changes: the file names, your settings and links stay as they were.
+- The known limits of 0.1.0 still apply: the builds are unsigned, so Windows or macOS may warn; macOS and Linux need ffmpeg for pictures and sound and don't offer seven of the languages yet; translations are machine-made.
+
 ## 0.1.0
 
 The first version of MP4 Splitter: cut a video into pieces without re-encoding.

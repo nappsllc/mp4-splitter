@@ -15,7 +15,7 @@ tip.export = Įrašyti dalis šalia vaizdo įrašo, nekodavus iš naujo (Ctrl+E;
 tip.one_file = Sujungti paliktas dalis iš eilės į vieną failą, nekodavus iš naujo
 tip.separate_files = Įrašyti kiekvieną paliktą dalį į atskirą failą
 tip.open = Atidaryti vaizdo įrašą (Ctrl+O) arba numesti jį ant lango
-tip.about = Apie MP4 Splitter (F1)
+tip.about = Apie PowerNapps MP4 Splitter (F1)
 tip.settings = Parametrai (Ctrl+,)
 
 preview.drop = Numesk MP4 čia arba spustelėk, kad atidarytum

@@ -13,7 +13,7 @@ tip.export = 동영상 옆에 조각을 저장합니다. 다시 인코딩하지 
 tip.one_file = 남긴 조각을 순서대로 파일 하나로 합칩니다. 다시 인코딩하지 않습니다
 tip.separate_files = 남긴 조각을 각각 별도 파일로 저장합니다
 tip.open = 동영상 열기 (Ctrl+O) 또는 창에 끌어다 놓기
-tip.about = MP4 Splitter 정보 (F1)
+tip.about = PowerNapps MP4 Splitter 정보 (F1)
 tip.settings = 설정 (Ctrl+,)
 
 preview.drop = 여기에 MP4를 놓거나 클릭해서 여세요

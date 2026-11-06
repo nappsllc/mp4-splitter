@@ -1,9 +1,9 @@
-<h1 align="center">MP4 Splitter</h1>
+<h1 align="center">PowerNapps MP4 Splitter</h1>
 
 **A tiny, good-looking, cross-platform tool that cuts MP4 videos into pieces
 without re-encoding.** Windows, macOS and Linux. Apache-2.0.
 
-![MP4 Splitter in the dark theme: a video trimmed at the start and cut into two pieces](docs/splitter-dark.png)
+![PowerNapps MP4 Splitter in the dark theme: a video trimmed at the start and cut into two pieces](docs/splitter-dark.png)
 
 ## Features
 
@@ -76,7 +76,7 @@ never overwrite a file.
 
 ## Pictures and sound
 
-Cutting is done by MP4 Splitter itself, on every system. The **pictures and
+Cutting is done by PowerNapps MP4 Splitter itself, on every system. The **pictures and
 sound** in the window come from:
 
 - **Windows:** the system. Media Foundation decodes, on the GPU where it can,

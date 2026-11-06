@@ -14,7 +14,7 @@ tip.export = A darabok kiírása a videó mellé, újrakódolás nélkül (Ctrl+
 tip.one_file = A megtartott darabok összefűzése sorrendben egy fájlba, újrakódolás nélkül
 tip.separate_files = Minden megtartott darab kiírása külön fájlba
 tip.open = Videó megnyitása (Ctrl+O), vagy húzd az ablakra
-tip.about = A(z) MP4 Splitter névjegye (F1)
+tip.about = A(z) PowerNapps MP4 Splitter névjegye (F1)
 tip.settings = Beállítások (Ctrl+,)
 
 preview.drop = Húzz ide egy MP4-et, vagy kattints a megnyitáshoz

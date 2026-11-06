@@ -14,7 +14,7 @@ tip.export = Gravar as partes junto ao vídeo, sem recodificar (Ctrl+E; Shift: e
 tip.one_file = Juntar as partes mantidas, por ordem, num só ficheiro, sem recodificar
 tip.separate_files = Gravar cada parte mantida no seu próprio ficheiro
 tip.open = Abrir um vídeo (Ctrl+O) ou largar um na janela
-tip.about = Acerca do MP4 Splitter (F1)
+tip.about = Acerca do PowerNapps MP4 Splitter (F1)
 tip.settings = Definições (Ctrl+,)
 
 preview.drop = Largue aqui um MP4 ou clique para abrir um

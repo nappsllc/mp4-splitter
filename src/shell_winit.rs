@@ -129,7 +129,7 @@ impl ApplicationHandler<UserEvent> for Shell {
             return;
         }
         let attrs = Window::default_attributes()
-            .with_title("MP4 Splitter")
+            .with_title(crate::APP_NAME)
             .with_inner_size(LogicalSize::new(START_CLIENT.0 as f64, START_CLIENT.1 as f64))
             .with_min_inner_size(LogicalSize::new(MIN_CLIENT.0 as f64, MIN_CLIENT.1 as f64));
         let window = match el.create_window(attrs) {

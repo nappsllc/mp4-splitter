@@ -547,7 +547,8 @@ pub fn run(open: Option<PathBuf>) -> Result<()> {
         let _ = AdjustWindowRectExForDpi(&mut rc, style, false, WINDOW_EX_STYLE(0), dx.max(96));
         let (ow, oh) = ((rc.right - rc.left).min(wa.right - wa.left), (rc.bottom - rc.top).min(wa.bottom - wa.top));
         let (x, y) = (wa.left + (wa.right - wa.left - ow) / 2, wa.top + (wa.bottom - wa.top - oh) / 2);
-        let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), CLASS, w!("MP4 Splitter"), style, x, y, ow, oh, None, None, Some(inst), None)?;
+        let hwnd =
+            CreateWindowExW(WINDOW_EX_STYLE(0), CLASS, &windows::core::HSTRING::from(crate::APP_NAME), style, x, y, ow, oh, None, None, Some(inst), None)?;
         let round = DWMWCP_ROUND;
         let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, (&raw const round).cast(), 4);
         // COM for the drop target (a failure here costs only drag and drop).

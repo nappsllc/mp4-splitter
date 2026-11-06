@@ -53,12 +53,12 @@ BEGIN
     BLOCK "040904B0"
     BEGIN
       VALUE "CompanyName", "PowerNapps"
-      VALUE "FileDescription", "MP4 Splitter"
+      VALUE "FileDescription", "PowerNapps MP4 Splitter"
       VALUE "FileVersion", "{ver}"
       VALUE "InternalName", "mp4-splitter"
       VALUE "LegalCopyright", "© 2026 PowerNapps"
       VALUE "OriginalFilename", "mp4-splitter.exe"
-      VALUE "ProductName", "MP4 Splitter"
+      VALUE "ProductName", "PowerNapps MP4 Splitter"
       VALUE "ProductVersion", "{ver}"
     END
   END

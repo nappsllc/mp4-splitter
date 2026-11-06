@@ -50,7 +50,7 @@ jobs:
         run: |
           $vi = (Get-Item target\release\mp4-splitter.exe).VersionInfo
           "ProductName='$($vi.ProductName)' CompanyName='$($vi.CompanyName)' ProductVersion='$($vi.ProductVersion)'"
-          if ($vi.ProductName -ne 'MP4 Splitter' -or $vi.ProductVersion -ne '${{ steps.version.outputs.version }}') { throw 'no version info: was rc.exe found?' }
+          if ($vi.ProductName -ne 'PowerNapps MP4 Splitter' -or $vi.ProductVersion -ne '${{ steps.version.outputs.version }}') { throw 'no version info: was rc.exe found?' }
 
       - name: Package
         shell: bash
@@ -112,4 +112,4 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" artifacts/* --title "MP4 Splitter $GITHUB_REF_NAME" --notes-file notes.md --verify-tag
+        run: gh release create "$GITHUB_REF_NAME" artifacts/* --title "PowerNapps MP4 Splitter $GITHUB_REF_NAME" --notes-file notes.md --verify-tag

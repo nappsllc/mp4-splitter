@@ -15,7 +15,7 @@ tip.export = Scrie bucățile lângă video, fără recodificare (Ctrl+E; Shift:
 tip.one_file = Îmbină bucățile păstrate, în ordine, într-un singur fișier, fără recodificare
 tip.separate_files = Scrie fiecare bucată păstrată în propriul fișier
 tip.open = Deschide un video (Ctrl+O) sau trage unul în fereastră
-tip.about = Despre MP4 Splitter (F1)
+tip.about = Despre PowerNapps MP4 Splitter (F1)
 tip.settings = Setări (Ctrl+,)
 
 preview.drop = Trage un MP4 aici sau fă clic pentru a deschide unul

@@ -362,7 +362,7 @@ impl App {
         self.doc = Some(doc);
         self.playhead = Duration::ZERO;
         self.toast = None;
-        self.host.set_title(&format!("{} — MP4 Splitter", file_name(path)));
+        self.host.set_title(&format!("{} — {}", file_name(path), crate::APP_NAME));
         if !self.decoder {
             self.say(player::no_decoder().0, true, None);
         }
@@ -1850,7 +1850,7 @@ impl App {
         let mr = Rect::new(cx - m / 2.0, r.y + 28.0 * s, m, m);
         c.rrect(mr, 18.0 * s, t.accent);
         c.icon(Icon::Scissors, mr.inset(14.0 * s, 14.0 * s), t.on_accent);
-        c.text(cx, mr.bottom() + 36.0 * s, 22.0 * s, t.text, "MP4 Splitter", Align::Center);
+        c.text(cx, mr.bottom() + 36.0 * s, 22.0 * s, t.text, crate::APP_NAME, Align::Center);
         c.text(cx, mr.bottom() + 58.0 * s, 13.0 * s, t.text_muted, &tr!("about.version", version = env!("CARGO_PKG_VERSION")), Align::Center);
         c.text(cx, mr.bottom() + 88.0 * s, 13.0 * s, t.text, tr!("about.line"), Align::Center);
         let sep = mr.bottom() + 106.0 * s;

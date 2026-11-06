@@ -1,9 +1,9 @@
-# MP4 Splitter UI strings: English, the source language and the template for
+# PowerNapps MP4 Splitter UI strings: English, the source language and the template for
 # translations (lang/<tag>.txt, same keys). Format: `key = value`, one per line;
 # {name} placeholders must stay as they are; plural strings have one line per
 # CLDR form the language uses: key[zero|one|two|few|many|other]. Metadata:
 # @name (the language in itself), @dir (ltr or rtl), @plural (the rule: see
-# src/plural.rs). Keys in parentheses, such as (Ctrl+E) or (F1), stay as written.
+# src/plural.rs). The name "PowerNapps MP4 Splitter" stays as it is. Keys in parentheses, such as (Ctrl+E) or (F1), stay as written.
 @name = English
 @dir = ltr
 @plural = one_other
@@ -21,7 +21,7 @@ tip.export = Write the pieces next to the video, without re-encoding (Ctrl+E; Sh
 tip.one_file = Join the kept pieces, in order, into one file, without re-encoding
 tip.separate_files = Write each kept piece to its own file
 tip.open = Open a video (Ctrl+O), or drop one on the window
-tip.about = About MP4 Splitter (F1)
+tip.about = About PowerNapps MP4 Splitter (F1)
 tip.settings = Settings (Ctrl+,)
 
 # The picture
