@@ -895,7 +895,10 @@ impl App {
         }
         let mut text = self.text.take().unwrap_or_else(Text::new);
         let dirty = self.dirty.replace(0);
-        self.hits.retain(|hit| hit.3 & dirty == 0 && hit.3 != OVER);
+        // A paint with nothing to draw (the window was uncovered) keeps them all.
+        if dirty != 0 {
+            self.hits.retain(|hit| hit.3 & dirty == 0 && hit.3 != OVER);
+        }
         // Everything at once, or band by band (each on its own rows: what
         // floats over them is cut to what is drawn).
         let whole = [(ALL, 0, h)];
