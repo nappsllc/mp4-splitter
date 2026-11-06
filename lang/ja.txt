@@ -13,7 +13,7 @@ tip.export = 動画と同じ場所にパートを書き出します。再エン�
 tip.one_file = 残したパートを順番に 1 つのファイルに結合します。再エンコードなし
 tip.separate_files = 残したパートをそれぞれ別のファイルに書き出します
 tip.open = 動画を開く (Ctrl+O)。ウィンドウにドロップしても開けます
-tip.about = MP4 Splitter について (F1)
+tip.about = PowerNapps MP4 Splitter について (F1)
 tip.settings = 設定 (Ctrl+,)
 
 preview.drop = ここに MP4 をドロップ、またはクリックして開く

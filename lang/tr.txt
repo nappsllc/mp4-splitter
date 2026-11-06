@@ -14,7 +14,7 @@ tip.export = Parçaları videonun yanına yaz, yeniden kodlamadan (Ctrl+E; Shift
 tip.one_file = Tutulan parçaları sırayla tek dosyada birleştir, yeniden kodlamadan
 tip.separate_files = Tutulan her parçayı kendi dosyasına yaz
 tip.open = Bir video aç (Ctrl+O) veya pencereye bırak
-tip.about = MP4 Splitter hakkında (F1)
+tip.about = PowerNapps MP4 Splitter hakkında (F1)
 tip.settings = Ayarlar (Ctrl+,)
 
 preview.drop = Buraya bir MP4 bırak veya açmak için tıkla

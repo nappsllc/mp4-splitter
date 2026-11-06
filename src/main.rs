@@ -1,4 +1,4 @@
-//! MP4 Splitter: cut a video into pieces without re-encoding.
+//! PowerNapps MP4 Splitter: cut a video into pieces without re-encoding.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 #![allow(unknown_lints, clippy::collapsible_if, clippy::chunks_exact_to_as_chunks)]
 
@@ -52,7 +52,7 @@ mod window;
 use std::path::PathBuf;
 use std::time::Duration;
 
-const HELP: &str = "MP4 Splitter — split MP4 videos losslessly
+const HELP: &str = "PowerNapps MP4 Splitter — split MP4 videos losslessly
 
 Usage:
   mp4-splitter [VIDEO]                     open the window
@@ -65,6 +65,10 @@ Usage:
 
 Pieces are written next to the video as <name>_part01.mp4, ...; joined ones
 as <name>_edited.mp4.";
+
+/// The name people see. The crate, the exe and the settings folder keep
+/// `mp4-splitter`, so links and settings carry over.
+pub const APP_NAME: &str = "PowerNapps MP4 Splitter";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();

@@ -15,7 +15,7 @@ tip.export = Zapiši dijelove pokraj videa, bez ponovnog kodiranja (Ctrl+E; Shif
 tip.one_file = Spoji zadržane dijelove, redom, u jednu datoteku, bez ponovnog kodiranja
 tip.separate_files = Zapiši svaki zadržani dio u zasebnu datoteku
 tip.open = Otvori videozapis (Ctrl+O) ili ga ispusti na prozor
-tip.about = O aplikaciji MP4 Splitter (F1)
+tip.about = O aplikaciji PowerNapps MP4 Splitter (F1)
 tip.settings = Postavke (Ctrl+,)
 
 preview.drop = Ispusti MP4 ovdje ili klikni za otvaranje

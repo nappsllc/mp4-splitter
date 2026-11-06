@@ -13,7 +13,7 @@ tip.export = 在视频旁边写出各片段，不重新编码 (Ctrl+E，Shift：
 tip.one_file = 按顺序把保留的片段合并成一个文件，不重新编码
 tip.separate_files = 把每个保留的片段写入各自的文件
 tip.open = 打开视频 (Ctrl+O)，或把视频拖到窗口上
-tip.about = 关于 MP4 Splitter (F1)
+tip.about = 关于 PowerNapps MP4 Splitter (F1)
 tip.settings = 设置 (Ctrl+,)
 
 preview.drop = 把 MP4 拖到这里，或单击打开

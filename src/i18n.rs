@@ -347,6 +347,15 @@ mod tests {
         }
     }
 
+    /// The app's whole name, in every language.
+    #[test]
+    fn every_language_calls_the_app_by_its_name() {
+        for l in &LANGS {
+            assert!(strings_of(l)["tip.about"].contains(crate::APP_NAME), "{}", l.tag);
+        }
+        assert_eq!(crate::APP_NAME, "PowerNapps MP4 Splitter");
+    }
+
     #[test]
     fn system_languages_find_their_files() {
         let codes: Vec<&str> = LANGS.iter().map(|l| l.tag).collect();

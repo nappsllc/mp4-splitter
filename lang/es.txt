@@ -14,7 +14,7 @@ tip.export = Escribir los fragmentos junto al vídeo, sin recodificar (Ctrl+E; S
 tip.one_file = Unir los fragmentos conservados, en orden, en un solo archivo, sin recodificar
 tip.separate_files = Escribir cada fragmento conservado en su propio archivo
 tip.open = Abrir un vídeo (Ctrl+O) o soltar uno en la ventana
-tip.about = Acerca de MP4 Splitter (F1)
+tip.about = Acerca de PowerNapps MP4 Splitter (F1)
 tip.settings = Configuración (Ctrl+,)
 
 preview.drop = Suelta un MP4 aquí o haz clic para abrir uno

@@ -14,7 +14,7 @@ tip.export = Écrire les morceaux à côté de la vidéo, sans réencodage (Ctrl
 tip.one_file = Assembler les morceaux conservés, dans l’ordre, en un seul fichier, sans réencodage
 tip.separate_files = Écrire chaque morceau conservé dans son propre fichier
 tip.open = Ouvrir une vidéo (Ctrl+O) ou en déposer une sur la fenêtre
-tip.about = À propos de MP4 Splitter (F1)
+tip.about = À propos de PowerNapps MP4 Splitter (F1)
 tip.settings = Paramètres (Ctrl+,)
 
 preview.drop = Déposez un MP4 ici, ou cliquez pour en ouvrir un
