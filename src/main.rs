@@ -5,6 +5,8 @@ mod app;
 mod audio;
 #[allow(dead_code)]
 mod deflate;
+#[cfg(windows)]
+mod dialogs;
 mod export;
 mod ffmpeg;
 #[allow(dead_code)]
@@ -17,11 +19,16 @@ mod player;
 #[allow(dead_code)]
 mod raster;
 mod shell;
-mod shell_winit;
 mod split;
 mod theme;
 #[allow(dead_code)]
 mod uifb;
+#[cfg(windows)]
+#[path = "shell_win.rs"]
+mod window;
+#[cfg(not(windows))]
+#[path = "shell_winit.rs"]
+mod window;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -58,7 +65,7 @@ fn main() {
         return;
     }
     let open = args.iter().find(|a| !a.starts_with('-')).map(PathBuf::from);
-    if let Err(e) = shell_winit::run(open) {
+    if let Err(e) = window::run(open) {
         eprintln!("error: can't open a window: {e}");
         std::process::exit(1);
     }
