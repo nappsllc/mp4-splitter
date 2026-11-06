@@ -6,7 +6,8 @@ Version 2.0 (see LICENSE).
 
 The lossless MP4 cutting code (src/mp4.rs) is adapted from Rustshot
 (https://github.com/nappsllc/rustshot, src/rec/cut/mp4.rs), Copyright 2026
-PowerNapps, licensed under the Apache License, Version 2.0.
+PowerNapps, licensed under the Apache License, Version 2.0, as is the code that
+embeds the icon and version info (build.rs, from Rustshot's build.rs).
 
 It also includes the Inter font (assets/fonts/Inter-Medium.subset.ttf),
 Copyright 2016 The Inter Project Authors, under the SIL Open Font License 1.1

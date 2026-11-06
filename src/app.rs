@@ -978,7 +978,11 @@ impl App {
         let t = self.theme;
         let l = self.l;
         let s = l.s;
-        let (x, cy) = (16.0 * s, l.header.cy());
+        let (x0, cy) = (16.0 * s, l.header.cy());
+        // The mark; the name is in the window's title bar.
+        c.rrect(Rect::new(x0, cy - 15.0 * s, 30.0 * s, 30.0 * s), 8.0 * s, t.accent);
+        c.icon(Icon::Scissors, Rect::new(x0 + 6.0 * s, cy - 9.0 * s, 18.0 * s, 18.0 * s), t.on_accent);
+        let x = x0 + 42.0 * s;
         // The buttons, from the right.
         let bh = 34.0 * s;
         let by = cy - bh / 2.0;
@@ -1559,6 +1563,33 @@ enum Style {
     Round,
 }
 
+/// Give the native title bar the app's colours (Windows 11; earlier versions
+/// ignore what they do not know and keep theirs).
+#[cfg(windows)]
+fn tint_title_bar(window: &Window, t: &Theme) {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    #[link(name = "dwmapi")]
+    unsafe extern "system" {
+        fn DwmSetWindowAttribute(hwnd: isize, attribute: u32, value: *const std::ffi::c_void, size: u32) -> i32;
+    }
+    const USE_IMMERSIVE_DARK_MODE: u32 = 20;
+    const BORDER_COLOR: u32 = 34;
+    const CAPTION_COLOR: u32 = 35;
+    const TEXT_COLOR: u32 = 36;
+    let Ok(handle) = window.window_handle() else { return };
+    let RawWindowHandle::Win32(h) = handle.as_raw() else { return };
+    let colorref = |c: C| c.r as u32 | (c.g as u32) << 8 | (c.b as u32) << 16;
+    for (attribute, value) in
+        [(USE_IMMERSIVE_DARK_MODE, u32::from(t.dark)), (CAPTION_COLOR, colorref(t.bg)), (TEXT_COLOR, colorref(t.text)), (BORDER_COLOR, colorref(t.bg))]
+    {
+        // SAFETY: the window is alive, and `value` outlives the call and is the 4 bytes given.
+        let _ = unsafe { DwmSetWindowAttribute(h.hwnd.get(), attribute, (&raw const value).cast(), 4) };
+    }
+}
+
+#[cfg(not(windows))]
+fn tint_title_bar(_: &Window, _: &Theme) {}
+
 fn file_name(p: &Path) -> String {
     p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
@@ -1653,6 +1684,13 @@ impl ApplicationHandler<UserEvent> for App {
             .with_title("MP4 Splitter")
             .with_inner_size(LogicalSize::new(1180.0, 780.0))
             .with_min_inner_size(LogicalSize::new(760.0, 560.0));
+        #[cfg(windows)]
+        let attrs = {
+            use winit::platform::windows::{IconExtWindows, WindowAttributesExtWindows};
+            // The icon embedded by build.rs: title bar and Alt+Tab, then the taskbar.
+            let icon = |_: ()| winit::window::Icon::from_resource(1, None).ok();
+            attrs.with_window_icon(icon(())).with_taskbar_icon(icon(()))
+        };
         let window = match el.create_window(attrs) {
             Ok(w) => Rc::new(w),
             Err(e) => {
@@ -1662,6 +1700,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
         };
         self.theme = theme::pick(window.theme());
+        tint_title_bar(&window, &self.theme);
         let ctx = match softbuffer::Context::new(window.clone()) {
             Ok(c) => c,
             Err(e) => {
@@ -1712,6 +1751,9 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::ThemeChanged(th) => {
                 self.theme = theme::pick(Some(th));
+                if let Some(w) = &self.window {
+                    tint_title_bar(w, &self.theme);
+                }
                 self.redraw();
             }
             WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
