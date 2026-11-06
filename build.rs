@@ -15,6 +15,8 @@ fn main() {
     println!("cargo:rerun-if-env-changed=RC");
     println!("cargo:rerun-if-changed=src/deflate.rs");
     bake_font();
+    println!("cargo:rerun-if-changed=lang");
+    pack_languages();
     // Check the *target*, not the host: cross-target checks run build.rs on the host.
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") || env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc") {
         return;
@@ -235,4 +237,37 @@ fn bake_font() {
     writeln!(w, "/// The packed ops, then the point coordinates (see build.rs).").unwrap();
     writeln!(w, r#"pub static OUTLINES_Z: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/font_outlines.z"));"#).unwrap();
     fs::write(out_dir.join("font_baked.rs"), out).expect("write font_baked.rs");
+}
+
+/// Every `lang/<tag>.txt`, English first among equals: one DEFLATE blob and a
+/// table of where each is, with what the language says about itself.
+fn pack_languages() {
+    use ab_glyph::{Font, FontRef};
+    use std::fmt::Write as _;
+    let font_bytes = fs::read("assets/fonts/Inter-Medium.subset.ttf").expect("read the Inter subset");
+    let font = FontRef::try_from_slice(&font_bytes).expect("parse the Inter subset");
+    let mut files: Vec<PathBuf> =
+        fs::read_dir("lang").expect("read lang/").flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "txt")).collect();
+    files.sort();
+    let (mut blob, mut table) = (String::new(), String::new());
+    for p in &files {
+        let tag = p.file_stem().unwrap().to_string_lossy().into_owned();
+        let text = fs::read_to_string(p).expect("read a language file").replace("\r\n", "\n");
+        let meta = |k: &str| text.lines().find_map(|l| l.strip_prefix(k).and_then(|r| r.strip_prefix(" = "))).unwrap_or("").to_string();
+        let baked = text.lines().filter(|l| !l.starts_with('#')).flat_map(str::chars).all(|c| c.is_control() || font.glyph_id(c).0 != 0);
+        writeln!(
+            table,
+            "    Lang {{ tag: {tag:?}, name: {:?}, rtl: {}, baked: {baked}, at: {}, len: {} }},",
+            meta("@name"),
+            meta("@dir") == "rtl",
+            blob.len(),
+            text.len()
+        )
+        .unwrap();
+        blob.push_str(&text);
+    }
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    fs::write(out_dir.join("lang.z"), deflate::deflate(blob.as_bytes(), deflate::Effort::BEST)).expect("write lang.z");
+    let table = format!("/// The languages in the app.\npub static LANGS: [Lang; {}] = [\n{table}];\nconst RAW_LEN: usize = {};\n", files.len(), blob.len());
+    fs::write(out_dir.join("lang_table.rs"), table).expect("write lang_table.rs");
 }

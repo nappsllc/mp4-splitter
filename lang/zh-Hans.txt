@@ -1,0 +1,84 @@
+@name = 简体中文
+@dir = ltr
+@plural = none
+
+header.open = 打开
+header.export = 导出
+header.exporting = 正在导出 {done}/{total}…
+header.export_pieces[other] = 导出 {n} 个片段
+header.one_file = 合并文件
+header.separate_files = 分开文件
+header.no_sound = 无声音
+tip.export = 在视频旁边写出各片段，不重新编码 (Ctrl+E，Shift：选择文件夹)
+tip.one_file = 按顺序把保留的片段合并成一个文件，不重新编码
+tip.separate_files = 把每个保留的片段写入各自的文件
+tip.open = 打开视频 (Ctrl+O)，或把视频拖到窗口上
+tip.about = 关于 MP4 Splitter (F1)
+tip.settings = 设置 (Ctrl+,)
+
+preview.drop = 把 MP4 拖到这里，或单击打开
+preview.lossless = 无损：片段只是复制，不会重新编码
+preview.no_video = 没有视频轨道（仅有声音）
+preview.loading = 正在加载…
+preview.cut_away = 已排除
+controls.frame = 第 {n} 帧
+controls.key = 关键
+tip.to_start = 跳到保留部分的开头 (再按一次：跳到最开头)
+tip.frame_back = 上一帧 (←，Shift：1 s)
+tip.play = 播放 / 暂停 (Space)
+tip.frame_fwd = 下一帧 (→，Shift：1 s)
+tip.to_end = 跳到保留部分的末尾 (再按一次：跳到最末尾)
+tip.mute = 静音 (M)
+tip.snap = 吸附到关键帧 (N)：片段将正好从关键帧开始，适用于忽略编辑列表的播放器
+tip.mark_out = 把结束点设在播放头处 (O)
+tip.cut = 在播放头处切分 (S)；双击时间轴可在该处切分
+tip.mark_in = 把起点设在播放头处 (I)
+
+tools.split_into = 分成
+tools.split_in = 分成 {n} 份
+tools.kept = 保留
+tools.pieces[other] = {n} 个片段
+tip.preset[other] = {n} 个等长片段 ({n})
+tip.fewer = 减少片段
+tip.more = 增加片段
+tip.split_in = 把保留部分平分成这么多个等长片段
+tip.clear_cuts = 清除所有切点 (0)
+
+timeline.empty = 打开视频后，时间轴会显示在这里
+timeline.reading = 正在读取声音…
+timeline.no_sound = 无声音
+tip.drop_piece = 排除此片段 (在播放头处按 Delete)
+tip.keep_piece = 恢复此片段
+hint.long = Space 播放 · ← → 帧 · Shift 1 s · ↑ ↓ 切点 · I / O 起点 / 终点 · S 切分 · Del 删除 · 2–9 平分 · 滚轮 缩放
+hint.short = Space 播放 · ← → 帧 · I / O 起点 / 终点 · S 切分 · 2–9 平分
+
+msg.cant_open = 无法打开 {name}：{error}
+msg.nothing_to_play = {name} 没有可播放的内容
+msg.saved_one = 已将 {name} 保存到 {dir}
+msg.saved[other] = 已将 {n} 个片段保存到 {dir}
+msg.export_failed = 导出失败：{error}
+msg.cut_room = 切点两侧在保留部分内都至少需要 0.1 s
+msg.only_fit[other] = 关键帧之间只能放下 {n} 个片段
+msg.one_stays = 至少要保留一个片段
+msg.remove_where = 把播放头放在切点上或片段内即可删除
+msg.show_folder = 显示文件夹
+msg.no_decoder = 未安装 Media Foundation：没有画面和声音，但仍可分割。安装 Media Feature Pack 即可查看视频。
+msg.no_decoder_hint = 未安装 Media Foundation：安装 Media Feature Pack 才能看到画面、听到声音
+msg.no_decoder_preview = 无预览：未安装 Media Foundation
+msg.no_ffmpeg = 未找到 ffmpeg：没有画面和声音，但仍可分割。安装 ffmpeg 即可查看视频。
+msg.no_ffmpeg_hint = 未找到 ffmpeg：安装后才能看到画面、听到声音
+msg.no_ffmpeg_preview = 无预览：未找到 ffmpeg
+
+settings.title = 设置
+settings.theme = 主题
+settings.theme.system = 系统
+settings.theme.dark = 深色
+settings.theme.light = 浅色
+settings.accent = 强调色
+settings.language = 语言
+settings.language.system = 系统语言
+
+about.version = 版本 {version}
+about.line = 无需重新编码，把视频切成片段。小巧，自行绘制界面，可在 Windows、macOS 和 Linux 上运行。
+about.more = PowerNapps 的更多应用
+about.footer = 2026 PowerNapps  ·  由 Denis Platonov 制作于洛杉矶  ·  Apache-2.0 许可证

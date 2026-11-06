@@ -34,6 +34,10 @@ without re-encoding.** Windows, macOS and Linux. Apache-2.0.
   button.
 - **Playback with sound**, scrubbing with the mouse and frame-exact stepping
   with the keyboard.
+- **35 languages**, right to left where they read that way, following your
+  system or your choice in Settings. On macOS and Linux, the ones outside the
+  built-in font (Arabic, Hebrew, Hindi, Thai, Chinese, Japanese, Korean) wait for
+  the OS text stack to be ported there.
 - **Dark and light themes** that follow your OS, or your choice in Settings,
   with Rustshot's design tokens, its accent colours and the Inter font. Everything is drawn by the app itself (no GUI
   toolkit, no web view). On Windows it is hand-rolled on the OS's own APIs, like

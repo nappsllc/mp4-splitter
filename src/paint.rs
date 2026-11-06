@@ -95,7 +95,8 @@ impl Text {
 
 /// `s` as it can be drawn: what the font lacks becomes a look-alike or `?`.
 fn shown<'a>(f: &UiFont, s: &'a str) -> Cow<'a, str> {
-    if s.chars().all(|c| f.has_glyph(c)) {
+    // The OS draws what the font lacks, on Windows.
+    if cfg!(windows) || s.chars().all(|c| f.has_glyph(c)) {
         return Cow::Borrowed(s);
     }
     let alt = |c| match c {
@@ -529,6 +530,7 @@ mod tests {
         assert!(buf.chunks_exact(4).filter(|p| p[0] > 128).count() > 30);
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn what_the_font_lacks_is_replaced() {
         assert_eq!(shown(ui_font(), "abc"), "abc");

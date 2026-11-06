@@ -20,9 +20,9 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// What to say when pictures and sound can't be decoded here (Windows "N").
-pub const NO_DECODER_TOAST: &str = "Media Foundation is not installed: no pictures or sound, but splitting works. Add the Media Feature Pack to see the video.";
-pub const NO_DECODER_HINT: &str = "Media Foundation is not installed: add the Media Feature Pack to see pictures and hear sound";
-pub const NO_DECODER_PREVIEW: &str = "No preview: Media Foundation is not installed";
+pub fn no_decoder() -> (&'static str, &'static str, &'static str) {
+    (tr!("msg.no_decoder"), tr!("msg.no_decoder_hint"), tr!("msg.no_decoder_preview"))
+}
 
 /// Waveform peaks a second.
 pub const PEAKS_PER_SEC: u32 = 100;

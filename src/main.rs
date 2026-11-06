@@ -2,6 +2,8 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 #![allow(unknown_lints, clippy::collapsible_if, clippy::chunks_exact_to_as_chunks)]
 
+#[macro_use]
+mod i18n;
 mod app;
 #[cfg(not(windows))]
 mod audio;
@@ -24,12 +26,15 @@ mod mf;
 mod mp4;
 #[allow(dead_code)]
 mod objects;
+#[cfg(windows)]
+mod ostext;
 mod paint;
 #[cfg(not(windows))]
 mod player;
 #[cfg(windows)]
 #[path = "player_win.rs"]
 mod player;
+mod plural;
 #[allow(dead_code)]
 mod raster;
 mod shell;

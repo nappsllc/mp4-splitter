@@ -144,8 +144,13 @@ impl UiFont {
         pen
     }
 
-    /// Advance width of `s` at `px`.
+    /// Advance width of `s` at `px` (on the OS text stack when the baked
+    /// glyphs do not cover it, on Windows).
     pub fn width(&self, s: &str, px: f32) -> f32 {
+        #[cfg(windows)]
+        if crate::ostext::needed(self, s) {
+            return crate::ostext::width(self, s, px);
+        }
         self.baked_width(s, px)
     }
 
@@ -157,8 +162,12 @@ impl UiFont {
     /// Rasterise `s` with the top-left corner at (x, y): calls `f(x, y,
     /// coverage)` for every pixel of each glyph's box (coverage 0..=1, or a
     /// little above 1 where contours overlap). Returns the advance width.
-    pub fn draw(&self, s: &str, px: f32, x: f32, y: f32, f: impl FnMut(i32, i32, f32)) -> f32 {
-        self.baked_draw(s, px, x, y, f)
+    pub fn draw(&self, s: &str, px: f32, x: f32, y: f32, mut f: impl FnMut(i32, i32, f32)) -> f32 {
+        #[cfg(windows)]
+        if crate::ostext::needed(self, s) {
+            return crate::ostext::draw(self, s, px, x, y, &mut f);
+        }
+        self.baked_draw(s, px, x, y, &mut f)
     }
 
     /// [`UiFont::draw`] with the baked glyphs only (.notdef for others).
