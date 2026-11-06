@@ -10,7 +10,7 @@ use crate::paint::{Align, C, Canvas, Icon, Picture, Rect, Text};
 use crate::player;
 use crate::player::{Playback, Source, Stills, Thumbs};
 use crate::raster::Order;
-use crate::shell::{Button, CursorKind, Host, Key, Mods, Tick, Wake};
+use crate::shell::{Button, CursorKind, Host, Key, MIN_CLIENT, Mods, Tick, Wake};
 use crate::split::{self, Marker, Plan};
 use crate::theme::{self, Theme};
 use crate::uifb::Fb;
@@ -75,6 +75,10 @@ enum Act {
     Settings,
     Theme(ThemeChoice),
     Accent(usize),
+    /// The window to the video's own size, or as large as fits.
+    ActualSize,
+    /// The window to the picture's shape, at the size it has now.
+    FitWindow,
     /// The language picker's item: 0 the system's, then each language.
     Language(usize),
 }
@@ -726,6 +730,7 @@ impl App {
                 self.config.accent = i;
                 self.settings_changed();
             }
+            Act::ActualSize | Act::FitWindow => self.size_window(a),
             Act::Language(i) => {
                 self.config.language = if i == 0 { String::new() } else { crate::i18n::languages().nth(i - 1).map_or(String::new(), |l| l.tag.to_string()) };
                 crate::i18n::set_language(&self.config.language);
@@ -734,6 +739,29 @@ impl App {
             Act::AboutLink => crate::links::open(crate::links::POWERNAPPS),
         }
         self.redraw();
+    }
+
+    /// Size the window to the video. Not when maximized: its size is the screen's then.
+    fn size_window(&mut self, a: Act) {
+        let Some(d) = &self.doc else { return };
+        if self.host.maximized() {
+            return;
+        }
+        let (vw, vh) = d.info.size.unwrap_or((16, 9));
+        let s = self.l.s;
+        let (w, h) = if a == Act::ActualSize {
+            actual_client((vw, vh), s, self.host.max_client())
+        } else {
+            let (r, _) = picture_rect(vw as f32, vh as f32, self.l.preview);
+            fit_client((r.w as u32, r.h as u32), s, self.host.max_client())
+        };
+        self.host.resize_client(w, h);
+        self.on_resize();
+        // Playing: on at the new size.
+        if self.playing.is_some() {
+            let t = self.playing.as_ref().map_or(self.playhead, |p| p.clock(self.audio.as_ref()));
+            self.seek(t);
+        }
     }
 
     /// Save the settings and show them.
@@ -819,6 +847,8 @@ impl App {
             Key::Enter | Key::F1 => {}
             Key::Char(c) => match c {
                 'o' if ctrl => self.open_dialog(),
+                '1' if ctrl => self.act(Act::ActualSize),
+                '0' if ctrl => self.act(Act::FitWindow),
                 'e' | 's' if ctrl => self.export(),
                 'q' | 'w' if ctrl => self.quit = true,
                 'k' => self.play(),
@@ -1290,19 +1320,23 @@ impl App {
         let mut x = r.x + 4.0 * s;
         x += c.text(x, cy + 7.0 * s, 20.0 * s, t.text, &tc, Align::Left);
         x += c.text(x, cy + 7.0 * s, 14.0 * s, t.text_muted, &format!("  /  {}", split::timecode(d.info.duration)), Align::Left);
+        // Transport: centred, or wherever fits between the time and the tools.
+        let b = 36.0 * s;
+        let big = 44.0 * s;
+        let gap = 6.0 * s;
+        let total = 4.0 * b + big + 4.0 * gap;
+        let tools = 7.0 * (b + gap) - if has_audio { 0.0 } else { b + gap } + 2.0 * 12.0 * s;
+        let mut bx = transport_x(r, total, tools, x, s);
         if !d.info.frames.is_empty() {
             let fi = split::frame_index(&d.info.frames, ph) + 1;
             let key = d.info.keys.binary_search(&d.info.frames[fi - 1]).is_ok();
             let key_note = if key { format!(" · {}", tr!("controls.key")) } else { String::new() };
             let label = format!("{}{key_note}", tr!("controls.frame", n = fi));
-            c.text(x + 12.0 * s, cy + 6.5 * s, 12.0 * s, t.text_faint, &label, Align::Left);
+            // Only where there is room for it.
+            if x + 12.0 * s + c.text.measure(&label, 12.0 * s) + 8.0 * s <= bx {
+                c.text(x + 12.0 * s, cy + 6.5 * s, 12.0 * s, t.text_faint, &label, Align::Left);
+            }
         }
-        // Transport, centred.
-        let b = 36.0 * s;
-        let big = 44.0 * s;
-        let gap = 6.0 * s;
-        let total = 4.0 * b + big + 4.0 * gap;
-        let mut bx = (r.cx() - total / 2.0).max(r.x + 300.0 * s);
         let playing = self.playing.is_some();
         for (act, icon, tip) in [(Act::ToStart, Icon::ToStart, tr!("tip.to_start")), (Act::FrameBack, Icon::FrameBack, tr!("tip.frame_back"))] {
             self.button(c, Rect::new(bx, cy - b / 2.0, b, b), act, tip, Some(icon), None, Style::Ghost);
@@ -1326,6 +1360,8 @@ impl App {
         let mut rx = r.right();
         let snap = self.snap;
         let muted = self.muted;
+        // Sizing the window to the video, not when it is maximized.
+        let sizable = !self.host.maximized();
         let items: [(Act, Icon, &'static str, Style); 5] = [
             (Act::Mute, if muted { Icon::Muted } else { Icon::Volume }, tr!("tip.mute"), if muted { Style::On } else { Style::Ghost }),
             (Act::Snap, Icon::KeyFrame, tr!("tip.snap"), if snap { Style::On } else { Style::Ghost }),
@@ -1345,6 +1381,19 @@ impl App {
                 c.line(rx, cy - 10.0 * s, rx, cy + 10.0 * s, 1.0 * s, t.separator);
                 rx -= 8.0 * s;
             }
+        }
+        rx -= 4.0 * s;
+        c.line(rx, cy - 10.0 * s, rx, cy + 10.0 * s, 1.0 * s, t.separator);
+        rx -= 8.0 * s;
+        for (act, icon, tip) in [(Act::FitWindow, Icon::FitWindow, tr!("tip.fit_window")), (Act::ActualSize, Icon::ActualSize, tr!("tip.actual_size"))] {
+            rx -= b;
+            let br = Rect::new(rx, cy - b / 2.0, b, b);
+            if sizable {
+                self.button(c, br, act, tip, Some(icon), None, Style::Ghost);
+            } else {
+                c.icon(icon, br.inset(7.0 * s, 7.0 * s), t.text_faint);
+            }
+            rx -= gap;
         }
     }
 
@@ -1903,6 +1952,59 @@ fn picture_rect(w: f32, h: f32, p: Rect) -> (Rect, bool) {
     (r, full_w && full_h)
 }
 
+/// Where the transport buttons start in the row `r`: centred if they can be,
+/// else as far over as leaves `tools` clear on the right, and never over the
+/// time, which ends at `time_end`.
+fn transport_x(r: Rect, total: f32, tools: f32, time_end: f32, s: f32) -> f32 {
+    (r.cx() - total / 2.0).min(r.right() - tools - total - 8.0 * s).max(time_end + 8.0 * s)
+}
+
+/// What the window takes around the preview, in physical pixels.
+fn chrome(s: f32) -> (f32, f32) {
+    let (w, h) = (4000.0 * s, 4000.0 * s);
+    let p = layout(w, h, s).preview;
+    (w - p.w, h - p.h)
+}
+
+/// The client area whose preview is exactly `w` × `h`, as near as the minimum
+/// allows, given the rounding at this scale.
+fn client_for(w: u32, h: u32, s: f32) -> (u32, u32) {
+    let (cw, ch) = chrome(s);
+    let (mut x, mut y) = ((w as f32 + cw).round() as i32, (h as f32 + ch).round() as i32);
+    let p = snapped(layout(x as f32, y as f32, s).preview);
+    x += w as i32 - p.w as i32;
+    y += h as i32 - p.h as i32;
+    (x.max(1) as u32, y.max(1) as u32)
+}
+
+fn clamp_client((w, h): (u32, u32), s: f32, max: (u32, u32)) -> (u32, u32) {
+    let (mw, mh) = ((MIN_CLIENT.0 as f32 * s).ceil() as u32, (MIN_CLIENT.1 as f32 * s).ceil() as u32);
+    (w.max(mw).min(max.0.max(mw)), h.max(mh).min(max.1.max(mh)))
+}
+
+/// The client area that shows a `v` video pixel for pixel, or, when that
+/// doesn't fit in `max`, as large as fits with no bars. (A video narrower than
+/// the minimum window keeps bars at the sides: the controls need that room.)
+fn actual_client(v: (u32, u32), s: f32, max: (u32, u32)) -> (u32, u32) {
+    let (cw, ch) = chrome(s);
+    let (vw, vh) = (v.0.max(1) as f32, v.1.max(1) as f32);
+    let k = ((max.0 as f32 - cw) / vw).min((max.1 as f32 - ch) / vh).clamp(0.01, 1.0);
+    let (w, h) = if k >= 1.0 {
+        v
+    } else {
+        // The height first, and the width from it: the shape stays the video's
+        // to the pixel, leaving no bars.
+        let h = (vh * k).floor().max(1.0);
+        ((h * vw / vh).round() as u32, h as u32)
+    };
+    clamp_client(client_for(w, h, s), s, max)
+}
+
+/// The client area with a preview exactly the picture's size, `r`: no bars.
+fn fit_client(r: (u32, u32), s: f32, max: (u32, u32)) -> (u32, u32) {
+    clamp_client(client_for(r.0, r.1, s), s, max)
+}
+
 /// A step between labelled ticks that leaves them ~90 logical px apart.
 fn nice_tick(span: f64, width_logical: f64) -> f64 {
     let want = span * 90.0 / width_logical.max(1.0);
@@ -2177,6 +2279,13 @@ mod tests {
         fn size(&self) -> (u32, u32) {
             (1180, 780)
         }
+        fn max_client(&self) -> (u32, u32) {
+            (1920, 1000)
+        }
+        fn maximized(&self) -> bool {
+            false
+        }
+        fn resize_client(&self, _: u32, _: u32) {}
         fn scale(&self) -> f32 {
             1.0
         }
@@ -2219,6 +2328,125 @@ mod tests {
         app.redraw_parts(HEADER);
         app.paint();
         assert_eq!(opens(&app), 1, "not doubled");
+    }
+
+    const SCALES: [f32; 5] = [1.0, 1.25, 1.5, 1.75, 2.0];
+    /// Roomy enough for what is asked.
+    const HUGE: (u32, u32) = (20_000, 20_000);
+
+    fn preview_of(c: (u32, u32), s: f32) -> Rect {
+        snapped(layout(c.0 as f32, c.1 as f32, s).preview)
+    }
+
+    #[test]
+    fn actual_size_shows_the_video_pixel_for_pixel_at_any_scale() {
+        for s in SCALES {
+            // Large enough to pass the minimum window at every scale.
+            for v in [(3840u32, 2160u32), (3000, 1125), (2561, 1441), (4000, 3000)] {
+                let c = actual_client(v, s, HUGE);
+                let p = preview_of(c, s);
+                assert_eq!((p.w as u32, p.h as u32), v, "{v:?} at {s}");
+                let (r, fills) = picture_rect(v.0 as f32, v.1 as f32, layout(c.0 as f32, c.1 as f32, s).preview);
+                assert!(fills, "no bars for {v:?} at {s}");
+                assert_eq!((r.w as u32, r.h as u32), v);
+            }
+        }
+    }
+
+    #[test]
+    fn a_video_that_does_not_fit_is_as_large_as_fits_with_no_bars() {
+        for s in SCALES {
+            let max = ((1900.0 * s) as u32, (1000.0 * s) as u32);
+            for v in [(3840u32, 2160u32), (7680, 4320), (5000, 1000), (4000, 3000)] {
+                let c = actual_client(v, s, max);
+                assert!(c.0 <= max.0 && c.1 <= max.1, "{v:?} at {s}: {c:?} in {max:?}");
+                let p = layout(c.0 as f32, c.1 as f32, s).preview;
+                let (_, fills) = picture_rect(v.0 as f32, v.1 as f32, p);
+                // Unless the minimum window holds it wider.
+                if c.0 as f32 > (MIN_CLIENT.0 as f32 * s).ceil() && c.1 as f32 > (MIN_CLIENT.1 as f32 * s).ceil() {
+                    assert!(fills, "bars for {v:?} at {s}: {c:?}");
+                }
+            }
+        }
+    }
+
+    /// `Info::size` is as shown, so a phone video is simply tall here.
+    /// Sizing the window to a tall video makes it as narrow as it can be: the
+    /// transport, the tools and the time must still not touch, with long files too.
+    #[test]
+    fn the_transport_row_fits_the_narrowest_window() {
+        for s in SCALES {
+            let l = layout(MIN_CLIENT.0 as f32 * s, MIN_CLIENT.1 as f32 * s, s);
+            let (b, big, gap) = (36.0 * s, 44.0 * s, 6.0 * s);
+            let total = 4.0 * b + big + 4.0 * gap;
+            let tools = 7.0 * (b + gap) + 24.0 * s;
+            let text = Text::new();
+            let time_end = l.controls.x + 4.0 * s + text.measure("1:00:00.000", 20.0 * s) + text.measure("  /  1:00:00.000", 14.0 * s);
+            let x = transport_x(l.controls, total, tools, time_end, s);
+            assert!(x > time_end, "at {s}");
+            assert!(x + total + 4.0 * s <= l.controls.right() - tools, "at {s}: {x} + {total}, tools {tools}, row ends {}", l.controls.right());
+        }
+    }
+
+    #[test]
+    fn the_transport_is_centred_when_there_is_room() {
+        let r = Rect::new(16.0, 0.0, 1148.0, 56.0);
+        assert_eq!(transport_x(r, 212.0, 318.0, 170.0, 1.0), r.cx() - 106.0);
+    }
+
+    #[test]
+    fn a_rotated_video_is_sized_upright() {
+        let tall = actual_client((1080, 1920), 1.0, (2500, 1400));
+        let wide = actual_client((1920, 1080), 1.0, (2500, 1400));
+        assert!(wide.0 > tall.0, "{wide:?} {tall:?}");
+        let p = preview_of(tall, 1.0);
+        let (r, _) = picture_rect(1080.0, 1920.0, p);
+        assert!((r.w / r.h - 1080.0 / 1920.0).abs() < 0.01, "{r:?}");
+        assert!(tall.1 <= 1400);
+    }
+
+    /// The controls need the minimum width; the preview still gets its height.
+    #[test]
+    fn a_small_video_keeps_the_minimum_width() {
+        for s in SCALES {
+            let c = actual_client((320, 240), s, HUGE);
+            assert_eq!(c.0, (MIN_CLIENT.0 as f32 * s).ceil() as u32, "at {s}");
+            let p = preview_of(c, s);
+            assert!(p.h >= 240.0, "at {s}: {p:?}");
+            // Tiny: the minimum both ways.
+            let t = actual_client((16, 16), s, HUGE);
+            assert_eq!(t.1, (MIN_CLIENT.1 as f32 * s).ceil() as u32, "at {s}");
+        }
+    }
+
+    #[test]
+    fn fitting_keeps_the_scale_and_removes_the_bars() {
+        for s in SCALES {
+            for (ww, wh) in [(1180.0, 780.0), (1500.0, 800.0), (1000.0, 1000.0)] {
+                for v in [(1280.0, 720.0), (1920.0, 800.0), (1080.0, 1920.0), (640.0, 480.0)] {
+                    let before = layout(ww * s, wh * s, s).preview;
+                    let (r, _) = picture_rect(v.0, v.1, before);
+                    let c = fit_client((r.w as u32, r.h as u32), s, HUGE);
+                    // It only ever shrinks, and never below the minimum.
+                    assert!(c.0 as f32 <= (ww * s).ceil() + 1.0 && c.1 as f32 <= (wh * s).ceil() + 1.0, "{v:?} {ww}x{wh} at {s}: {c:?}");
+                    let (r2, fills) = picture_rect(v.0, v.1, layout(c.0 as f32, c.1 as f32, s).preview);
+                    let at_min = c.0 as f32 == (MIN_CLIENT.0 as f32 * s).ceil() || c.1 as f32 == (MIN_CLIENT.1 as f32 * s).ceil();
+                    if !at_min {
+                        assert!(fills, "bars for {v:?} {ww}x{wh} at {s}: {c:?}");
+                        assert!((r2.w - r.w).abs() <= 1.0 && (r2.h - r.h).abs() <= 1.0, "the scale moved: {r:?} to {r2:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_window_stays_in_the_work_area_unless_the_minimum_says_otherwise() {
+        let small = (800, 600);
+        assert_eq!(clamp_client((5000, 5000), 1.0, small), (800, 600));
+        // A screen smaller than the minimum window: the minimum wins.
+        assert_eq!(clamp_client((5000, 5000), 1.0, (500, 400)), (760, 560));
+        assert_eq!(clamp_client((10, 10), 2.0, small), (1520, 1120));
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //! changed. File dialogs run on their own threads.
 
 use crate::app::App;
-use crate::shell::{Button, CursorKind, Host, Key, Mods, Picked, Wake};
+use crate::shell::{Button, CursorKind, Host, Key, MIN_CLIENT as MIN, Mods, Picked, START_CLIENT as START, Wake};
 use crate::theme::Theme;
 use anyhow::{Result, anyhow};
 use std::cell::{Cell, RefCell};
@@ -20,7 +20,7 @@ use windows::Win32::Graphics::Dwm::{
 };
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, DIB_RGB_COLORS, EndPaint, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-    MonitorFromPoint, PAINTSTRUCT, SetDIBitsToDevice, UpdateWindow,
+    MonitorFromPoint, MonitorFromWindow, PAINTSTRUCT, SetDIBitsToDevice, UpdateWindow,
 };
 use windows::Win32::System::Com::{DVASPECT_CONTENT, FORMATETC, IDataObject, TYMED_HGLOBAL};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -49,9 +49,6 @@ const TIMER_SIZING: usize = 1;
 const SIZING_MS: u32 = 16;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const INFINITE: u32 = u32::MAX;
-/// The smallest client area, in logical pixels.
-const MIN: (i32, i32) = (760, 560);
-const START: (i32, i32) = (1180, 780);
 
 struct Win32Host {
     hwnd: HWND,
@@ -70,6 +67,16 @@ impl Post {
     fn hwnd(self) -> HWND {
         HWND(self.0 as *mut _)
     }
+}
+
+/// The work area of the monitor the window is on.
+fn work_area(hwnd: HWND) -> RECT {
+    let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+    // SAFETY: the out-parameter outlives the call.
+    unsafe {
+        let _ = GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut mi);
+    }
+    mi.rcWork
 }
 
 fn set_cursor(c: CursorKind) {
@@ -100,6 +107,40 @@ impl Host for Win32Host {
         match unsafe { GetDpiForWindow(self.hwnd) } {
             0 => 1.0,
             dpi => dpi as f32 / 96.0,
+        }
+    }
+
+    fn max_client(&self) -> (u32, u32) {
+        // SAFETY: the window lives as long as the app; the out-parameters outlive the calls.
+        unsafe {
+            let wa = work_area(self.hwnd);
+            let (mut empty, dpi) = (RECT::default(), GetDpiForWindow(self.hwnd).max(96));
+            let style = WINDOW_STYLE(GetWindowLongPtrW(self.hwnd, GWL_STYLE) as u32);
+            let _ = AdjustWindowRectExForDpi(&mut empty, style, false, WINDOW_EX_STYLE(0), dpi);
+            let frame = (empty.right - empty.left, empty.bottom - empty.top);
+            ((wa.right - wa.left - frame.0).max(1) as u32, (wa.bottom - wa.top - frame.1).max(1) as u32)
+        }
+    }
+
+    fn maximized(&self) -> bool {
+        // SAFETY: the window lives as long as the app.
+        unsafe { IsZoomed(self.hwnd).as_bool() }
+    }
+
+    fn resize_client(&self, w: u32, h: u32) {
+        // SAFETY: the window lives as long as the app; the out-parameters outlive the calls.
+        unsafe {
+            let dpi = GetDpiForWindow(self.hwnd).max(96);
+            let style = WINDOW_STYLE(GetWindowLongPtrW(self.hwnd, GWL_STYLE) as u32);
+            let mut rc = RECT { left: 0, top: 0, right: w as i32, bottom: h as i32 };
+            let _ = AdjustWindowRectExForDpi(&mut rc, style, false, WINDOW_EX_STYLE(0), dpi);
+            let (ow, oh) = (rc.right - rc.left, rc.bottom - rc.top);
+            let mut now = RECT::default();
+            let _ = GetWindowRect(self.hwnd, &mut now);
+            let wa = work_area(self.hwnd);
+            let x = now.left.min(wa.right - ow).max(wa.left);
+            let y = now.top.min(wa.bottom - oh).max(wa.top);
+            let _ = SetWindowPos(self.hwnd, None, x, y, ow, oh, SWP_NOZORDER | SWP_NOACTIVATE);
         }
     }
 

@@ -374,6 +374,21 @@ impl Canvas<'_> {
                 strokes.push(poly(&[(9.0, 14.0), (4.0, 9.0), (9.0, 4.0)], false));
                 strokes.push(poly(&[(4.0, 9.0), (14.5, 9.0), (18.0, 10.5), (20.0, 14.0), (18.0, 17.5), (14.5, 20.0), (11.0, 20.0)], false));
             }
+            Icon::ActualSize => {
+                // 1:1.
+                strokes.push(poly(&[(4.0, 8.5), (6.5, 6.5), (6.5, 17.5)], false));
+                strokes.push(poly(&[(15.5, 8.5), (18.0, 6.5), (18.0, 17.5)], false));
+                dots.push((12.0, 9.5, 1.3));
+                dots.push((12.0, 14.5, 1.3));
+            }
+            Icon::FitWindow => {
+                // A frame closing in around the picture.
+                strokes.push(poly(&[(4.0, 8.0), (4.0, 4.0), (8.0, 4.0)], false));
+                strokes.push(poly(&[(16.0, 4.0), (20.0, 4.0), (20.0, 8.0)], false));
+                strokes.push(poly(&[(20.0, 16.0), (20.0, 20.0), (16.0, 20.0)], false));
+                strokes.push(poly(&[(8.0, 20.0), (4.0, 20.0), (4.0, 16.0)], false));
+                strokes.push(poly(&[(8.5, 9.0), (15.5, 9.0), (15.5, 15.0), (8.5, 15.0)], true));
+            }
             Icon::Gear => {
                 rings.push((12.0, 12.0, 3.0));
                 rings.push((12.0, 12.0, 7.5));
@@ -449,6 +464,8 @@ pub enum Icon {
     KeyFrame,
     Trash,
     Film,
+    ActualSize,
+    FitWindow,
     Gear,
     Info,
     Minus,

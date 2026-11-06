@@ -6,6 +6,11 @@ use crate::theme::Theme;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// The smallest client area, in logical pixels.
+pub const MIN_CLIENT: (u32, u32) = (760, 560);
+/// The client area a window opens with, in logical pixels.
+pub const START_CLIENT: (u32, u32) = (1180, 780);
+
 /// Wakes the app's thread from another one.
 pub type Wake = Arc<dyn Fn() + Send + Sync>;
 
@@ -60,6 +65,12 @@ pub trait Host {
     fn size(&self) -> (u32, u32);
     /// Physical pixels a logical one.
     fn scale(&self) -> f32;
+    /// The largest client area that fits the monitor's work area, in physical pixels.
+    fn max_client(&self) -> (u32, u32);
+    /// Is the window maximized?
+    fn maximized(&self) -> bool;
+    /// Give the window this client area, top-left kept, kept on its monitor.
+    fn resize_client(&self, w: u32, h: u32);
     /// Repaint these rows (`y0..y1`), or everything.
     fn redraw(&self, rows: Option<(u32, u32)>);
     fn set_title(&self, title: &str);
