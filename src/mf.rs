@@ -443,12 +443,6 @@ impl VideoReader {
         }
     }
 
-    /// What was chosen, for the tests' reports.
-    #[cfg(test)]
-    pub fn describe(&self) -> String {
-        format!("coded {:?} shown {:?} stride {} on the GPU {}", self.coded, self.shown, self.stride, self._gpu.is_some())
-    }
-
     /// Seek to the last key frame at or before `hns` in the file's time.
     pub fn seek(&mut self, hns: i64) -> Result<()> {
         self.stamps.sought();
