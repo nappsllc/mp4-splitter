@@ -397,6 +397,24 @@ impl Canvas<'_> {
                 strokes.extend(poly(&[(17.0, 4.0), (17.0, 20.0)], false));
                 strokes.extend(poly(&[(3.0, 12.0), (21.0, 12.0)], false));
             }
+            Icon::Columns => {
+                strokes.extend(poly(&[(3.0, 4.0), (21.0, 4.0), (21.0, 20.0), (3.0, 20.0)], true));
+                strokes.extend(poly(&[(9.0, 4.0), (9.0, 20.0)], false));
+                strokes.extend(poly(&[(15.0, 4.0), (15.0, 20.0)], false));
+            }
+            Icon::File => {
+                strokes.extend(poly(&[(14.0, 3.0), (5.0, 3.0), (5.0, 21.0), (19.0, 21.0), (19.0, 8.0)], true));
+                strokes.extend(poly(&[(14.0, 3.0), (14.0, 8.0), (19.0, 8.0)], false));
+            }
+            Icon::Files => {
+                strokes.extend(poly(&[(15.0, 7.0), (9.0, 7.0), (9.0, 21.0), (20.0, 21.0), (20.0, 12.0)], true));
+                strokes.extend(poly(&[(15.0, 7.0), (15.0, 12.0), (20.0, 12.0)], false));
+                strokes.extend(poly(&[(5.0, 17.0), (4.0, 17.0), (4.0, 3.0), (14.0, 3.0)], false));
+            }
+            Icon::Undo => {
+                strokes.extend(poly(&[(9.0, 14.0), (4.0, 9.0), (9.0, 4.0)], false));
+                strokes.extend(poly(&[(4.0, 9.0), (14.5, 9.0), (18.0, 10.5), (20.0, 14.0), (18.0, 17.5), (14.5, 20.0), (11.0, 20.0)], false));
+            }
             Icon::Minus => strokes.extend(poly(&[(6.0, 12.0), (18.0, 12.0)], false)),
             Icon::Plus => {
                 strokes.extend(poly(&[(6.0, 12.0), (18.0, 12.0)], false));
@@ -421,6 +439,10 @@ impl Canvas<'_> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
+    Columns,
+    File,
+    Files,
+    Undo,
     Play,
     Pause,
     FrameBack,

@@ -1019,13 +1019,13 @@ impl App {
         // Separate files or one, when there is more than one piece.
         let mut left = er.x;
         if self.doc.as_ref().is_some_and(|d| d.plan.on.len() > 1) {
-            let one = c.text.measure("One file", 13.0 * s) + 24.0 * s;
-            let sep = c.text.measure("Separate files", 13.0 * s) + 24.0 * s;
+            let one = c.text.measure("One file", 13.0 * s) + 18.0 * s + 6.0 * s + 24.0 * s;
+            let sep = c.text.measure("Separate files", 13.0 * s) + 18.0 * s + 6.0 * s + 24.0 * s;
             let join = self.join;
             let (ro, rs) = (Rect::new(left - 8.0 * s - one, by, one, bh), Rect::new(left - 8.0 * s - one - 2.0 * s - sep, by, sep, bh));
             let on = |yes: bool| if yes { Style::On } else { Style::Secondary };
-            self.button(c, ro, Act::Join(true), "Join the kept pieces, in order, into one file, without re-encoding", None, Some("One file"), on(join));
-            self.button(c, rs, Act::Join(false), "Write each kept piece to its own file", None, Some("Separate files"), on(!join));
+            self.button(c, ro, Act::Join(true), "Join the kept pieces, in order, into one file, without re-encoding", Some(Icon::File), Some("One file"), on(join));
+            self.button(c, rs, Act::Join(false), "Write each kept piece to its own file", Some(Icon::Files), Some("Separate files"), on(!join));
             left = rs.x;
         }
         let ow = c.text.measure("Open", 13.0 * s) + 18.0 * s + 6.0 * s + 28.0 * s;
@@ -1198,6 +1198,8 @@ impl App {
         let kept = d.plan.kept();
         let has_cuts = !d.plan.cuts.is_empty();
         let mut x = r.x + 4.0 * s;
+        c.icon(Icon::Columns, Rect::new(x, cy - 8.0 * s, 16.0 * s, 16.0 * s), t.icon);
+        x += 22.0 * s;
         x += c.text(x, cy + 4.5 * s, 13.0 * s, t.text_muted, "Split into", Align::Left) + 10.0 * s;
         let bh = 30.0 * s;
         for n in 2..=5usize {
@@ -1224,9 +1226,9 @@ impl App {
         self.button(c, Rect::new(x + 64.0 * s, grp.y, 30.0 * s, bh), Act::NPlus, "More pieces", Some(Icon::Plus), None, Style::Ghost);
         x = grp.right() + 6.0 * s;
         let lbl = format!("Split in {n}");
-        let w = c.text.measure(&lbl, 13.0 * s) + 24.0 * s;
+        let w = c.text.measure(&lbl, 13.0 * s) + 18.0 * s + 6.0 * s + 24.0 * s;
         let style = if pieces == n && self.equal_split(n) { Style::On } else { Style::Secondary };
-        self.button(c, Rect::new(x, cy - bh / 2.0, w, bh), Act::NApply, "Split the kept part into this many equal pieces", None, Some(&lbl), style);
+        self.button(c, Rect::new(x, cy - bh / 2.0, w, bh), Act::NApply, "Split the kept part into this many equal pieces", Some(Icon::Columns), Some(&lbl), style);
         x += w + 6.0 * s;
         if has_cuts {
             self.button(c, Rect::new(x, cy - bh / 2.0, bh, bh), Act::ClearCuts, "Remove all cuts (0)", Some(Icon::Trash), None, Style::Ghost);
@@ -1437,7 +1439,8 @@ impl App {
             let on = d.plan.on.get(i).copied().unwrap_or(true);
             let full = format!("{}  ·  {}", i + 1, split::timecode(*b - *a));
             let lbl = if c.text.measure(&full, 11.0 * s) + 20.0 * s < x1 - x0 { full } else { (i + 1).to_string() };
-            let w = c.text.measure(&lbl, 11.0 * s) + 14.0 * s;
+            let tw = c.text.measure(&lbl, 11.0 * s);
+            let w = tw + 14.0 * s + 15.0 * s;
             let cx = (x0 + x1) / 2.0;
             let pr = Rect::new(cx - w / 2.0, l.labels.y + 5.0 * s, w, 18.0 * s);
             let hot = self.hover == Some(Act::Piece(i));
@@ -1445,9 +1448,11 @@ impl App {
             if hot {
                 c.rrect_stroke(pr, 9.0 * s, 1.0 * s, if on { t.accent } else { t.text_muted });
             }
-            c.text(cx, pr.cy() + 4.0 * s, 11.0 * s, if on { t.accent } else { t.text_faint }, &lbl, Align::Center);
+            let (ix, tx) = (pr.x + 6.0 * s, pr.x + 21.0 * s);
+            c.icon(if on { Icon::Close } else { Icon::Undo }, Rect::new(ix, pr.cy() - 5.5 * s, 11.0 * s, 11.0 * s), if on { t.accent } else { t.text_muted });
+            c.text(tx, pr.cy() + 4.0 * s, 11.0 * s, if on { t.accent } else { t.text_faint }, &lbl, Align::Left);
             if !on {
-                c.line(pr.x + 5.0 * s, pr.cy(), pr.right() - 5.0 * s, pr.cy(), 1.0 * s, t.text_muted);
+                c.line(tx - 1.0 * s, pr.cy(), tx + tw + 1.0 * s, pr.cy(), 1.0 * s, t.text_muted);
             }
             self.hits.push((pr, Act::Piece(i), if on { "Leave this piece out (Delete at the playhead)" } else { "Put this piece back" }));
         }
@@ -1506,7 +1511,7 @@ impl App {
         let maxw = self.l.w - 120.0 * s;
         let text = ellipsize(c.text, &text, px, maxw - 160.0 * s);
         let tw = c.text.measure(&text, px);
-        let extra = if reveal { c.text.measure("Show folder", px) + 30.0 * s } else { 0.0 } + 36.0 * s;
+        let extra = if reveal { c.text.measure("Show folder", px) + 52.0 * s } else { 0.0 } + 36.0 * s;
         let w = tw + 40.0 * s + extra;
         let r = Rect::new(self.l.w / 2.0 - w / 2.0, self.l.preview.bottom() - 60.0 * s, w, 42.0 * s);
         c.shadow(r, 12.0 * s);
@@ -1515,11 +1520,12 @@ impl App {
         c.text(r.x + 32.0 * s, r.cy() + 4.5 * s, px, t.tooltip_text, &text, Align::Left);
         let mut x = r.x + 32.0 * s + tw + 10.0 * s;
         if reveal {
-            let bw = c.text.measure("Show folder", px) + 20.0 * s;
+            let bw = c.text.measure("Show folder", px) + 42.0 * s;
             let br = Rect::new(x, r.cy() - 14.0 * s, bw, 28.0 * s);
             let hover = self.hit_hover(br);
             c.rrect(br, 7.0 * s, if hover { t.accent_hover } else { t.accent });
-            c.text(br.cx(), br.cy() + 4.5 * s, px, t.on_accent, "Show folder", Align::Center);
+            c.icon(Icon::Folder, Rect::new(br.x + 10.0 * s, br.cy() - 8.0 * s, 16.0 * s, 16.0 * s), t.on_accent);
+            c.text(br.x + 32.0 * s, br.cy() + 4.5 * s, px, t.on_accent, "Show folder", Align::Left);
             self.hits.push((br, Act::ShowFolder, ""));
             x += bw + 4.0 * s;
         }
