@@ -56,7 +56,7 @@ fn write_one(src: &Path, out: &Path, write: impl FnOnce(&mut BufReader<File>, &m
 
 /// [`write_pieces`] on a thread, or [`write_joined`] when `join` (`outs` then
 /// holds the one file); `wake` after each file.
-pub fn start(src: PathBuf, pieces: Vec<(Duration, Duration)>, outs: Vec<PathBuf>, join: bool, wake: crate::player::Wake) -> Arc<Mutex<Progress>> {
+pub fn start(src: PathBuf, pieces: Vec<(Duration, Duration)>, outs: Vec<PathBuf>, join: bool, wake: crate::shell::Wake) -> Arc<Mutex<Progress>> {
     let p = Arc::new(Mutex::new(Progress { done: 0, total: outs.len(), result: None }));
     let p2 = p.clone();
     std::thread::spawn(move || {

@@ -5,27 +5,28 @@
 use crate::audio::Output;
 use crate::export::{self, Progress};
 use crate::paint::{Align, C, Canvas, Icon, Picture, Rect, Text};
-use crate::player::{Playback, Source, Stills, Thumbs, Wake};
+use crate::player::{Playback, Source, Stills, Thumbs};
 use crate::raster::Order;
+use crate::shell::{Button, CursorKind, Host, Key, Mods, Tick, Wake};
 use crate::split::{self, Marker, Plan};
 use crate::theme::{self, Theme};
 use crate::uifb::Fb;
 use crate::{ffmpeg, mp4};
-use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
-use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
-use winit::keyboard::{Key, ModifiersState, NamedKey};
-use winit::window::{CursorIcon, Window, WindowId};
 
-#[derive(Debug, Clone, Copy)]
-pub enum UserEvent {
-    Wake,
+/// A frame ready to show: BGRA, `w` * `h`.
+pub struct Frame<'a> {
+    pub w: u32,
+    pub h: u32,
+    pub bgra: &'a [u8],
+}
+
+/// What a file dialog came back with, waiting for the app's thread.
+enum Dialog {
+    Open(Option<PathBuf>),
+    ExportTo(Option<PathBuf>),
 }
 
 /// What a click on a control does.
@@ -134,9 +135,11 @@ fn layout(w: f32, h: f32, s: f32) -> Layout {
 }
 
 pub struct App {
-    proxy: EventLoopProxy<UserEvent>,
-    window: Option<Rc<Window>>,
-    surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
+    host: Box<dyn Host>,
+    /// A file dialog's answer, set from wherever it ran.
+    dialog: Arc<Mutex<Option<Dialog>>>,
+    /// Asked to quit (Ctrl+Q).
+    quit: bool,
     /// The frame (BGRA), kept between paints.
     canvas: Vec<u8>,
     text: Option<Text>,
@@ -154,7 +157,7 @@ pub struct App {
     join: bool,
     n: usize,
     mouse: (f32, f32),
-    mods: ModifiersState,
+    mods: Mods,
     hits: Vec<(Rect, Act, &'static str)>,
     hover: Option<Act>,
     hover_since: Instant,
@@ -166,22 +169,26 @@ pub struct App {
     toast: Option<Toast>,
     exporting: Option<Arc<Mutex<Progress>>>,
     drop_hover: bool,
-    pending_open: Option<PathBuf>,
     /// Quit after this long (tests and screenshots).
     autoclose: Option<Instant>,
 }
 
 impl App {
-    pub fn new(proxy: EventLoopProxy<UserEvent>, open: Option<PathBuf>) -> App {
+    /// The app in `host`'s window, opening `open`; `dark`: the OS's theme, if known.
+    pub fn new(host: Box<dyn Host>, dark: Option<bool>, open: Option<PathBuf>) -> App {
         let autoclose = std::env::var("MP4_SPLITTER_AUTOCLOSE_MS").ok().and_then(|v| v.parse().ok()).map(|ms| Instant::now() + Duration::from_millis(ms));
-        App {
-            proxy,
-            window: None,
-            surface: None,
+        let theme = theme::pick(dark);
+        host.set_colors(&theme);
+        let (w, h) = host.size();
+        let l = layout(w as f32, h as f32, host.scale());
+        let mut app = App {
+            host,
+            dialog: Arc::default(),
+            quit: false,
             canvas: Vec::new(),
             text: Some(Text::new()),
-            theme: theme::DARK,
-            l: Layout::default(),
+            theme,
+            l,
             ffmpeg: ffmpeg::find(),
             audio: None,
             doc: None,
@@ -193,7 +200,7 @@ impl App {
             join: false,
             n: 6,
             mouse: (-1.0, -1.0),
-            mods: ModifiersState::default(),
+            mods: Mods::default(),
             hits: Vec::new(),
             hover: None,
             hover_since: Instant::now(),
@@ -204,22 +211,21 @@ impl App {
             toast: None,
             exporting: None,
             drop_hover: false,
-            pending_open: open,
             autoclose,
+        };
+        if let Some(p) = open {
+            app.open(&p);
         }
+        app.redraw();
+        app
     }
 
     fn wake(&self) -> Wake {
-        let p = self.proxy.clone();
-        Arc::new(move || {
-            let _ = p.send_event(UserEvent::Wake);
-        })
+        self.host.wake()
     }
 
     fn redraw(&self) {
-        if let Some(w) = &self.window {
-            w.request_redraw();
-        }
+        self.host.redraw(None);
     }
 
     fn say(&mut self, text: impl Into<String>, error: bool, reveal: Option<PathBuf>) {
@@ -230,13 +236,15 @@ impl App {
     // --- files ---------------------------------------------------------------
 
     fn open_dialog(&mut self) {
-        let mut d = rfd::FileDialog::new().add_filter("Video", &["mp4", "m4v", "mov", "MP4", "M4V", "MOV"]).set_title("Open a video");
-        if let Some(dir) = self.doc.as_ref().and_then(|d| d.path.parent()) {
-            d = d.set_directory(dir);
-        }
-        if let Some(p) = d.pick_file() {
-            self.open(&p);
-        }
+        let dir = self.doc.as_ref().and_then(|d| d.path.parent()).map(Path::to_path_buf);
+        let (slot, wake) = (self.dialog.clone(), self.wake());
+        self.host.pick_file(
+            dir,
+            Box::new(move |p| {
+                *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(Dialog::Open(p));
+                wake();
+            }),
+        );
     }
 
     fn open(&mut self, path: &Path) {
@@ -275,9 +283,7 @@ impl App {
         self.doc = Some(doc);
         self.playhead = Duration::ZERO;
         self.toast = None;
-        if let Some(w) = &self.window {
-            w.set_title(&format!("{} — MP4 Splitter", file_name(path)));
-        }
+        self.host.set_title(&format!("{} — MP4 Splitter", file_name(path)));
         if self.ffmpeg.is_none() {
             self.say("ffmpeg was not found: no pictures or sound, but splitting works. Install ffmpeg to see the video.", true, None);
         }
@@ -290,14 +296,23 @@ impl App {
             return;
         }
         let Some(d) = &self.doc else { return self.open_dialog() };
-        let dir = if self.mods.shift_key() {
-            match rfd::FileDialog::new().set_title("Export the pieces to").set_directory(d.path.parent().unwrap_or(Path::new("."))).pick_folder() {
-                Some(dir) => dir,
-                None => return,
-            }
-        } else {
-            d.path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."))
-        };
+        let next_to = d.path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+        if self.mods.shift {
+            let (slot, wake) = (self.dialog.clone(), self.wake());
+            self.host.pick_folder(
+                Some(next_to),
+                Box::new(move |p| {
+                    *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(Dialog::ExportTo(p));
+                    wake();
+                }),
+            );
+            return;
+        }
+        self.export_to(next_to);
+    }
+
+    fn export_to(&mut self, dir: PathBuf) {
+        let Some(d) = &self.doc else { return };
         let pieces = d.plan.kept_pieces();
         let join = self.join && d.plan.on.len() > 1;
         let outs = if join { vec![split::joined_path(&d.path, &dir)] } else { split::output_paths(&d.path, &dir, pieces.len()) };
@@ -650,36 +665,34 @@ impl App {
         self.redraw();
     }
 
-    fn key(&mut self, ev: &KeyEvent, el: &ActiveEventLoop) {
-        if ev.state != ElementState::Pressed {
-            return;
-        }
-        let ctrl = self.mods.control_key() || self.mods.super_key();
-        let shift = self.mods.shift_key();
-        match &ev.logical_key {
-            Key::Named(NamedKey::Space) => self.play(),
-            Key::Named(NamedKey::ArrowLeft) if ctrl => self.jump(-5.0),
-            Key::Named(NamedKey::ArrowRight) if ctrl => self.jump(5.0),
-            Key::Named(NamedKey::ArrowLeft) if shift => self.jump(-1.0),
-            Key::Named(NamedKey::ArrowRight) if shift => self.jump(1.0),
-            Key::Named(NamedKey::ArrowLeft) => self.step_frame(-1),
-            Key::Named(NamedKey::ArrowRight) => self.step_frame(1),
-            Key::Named(NamedKey::ArrowUp) | Key::Named(NamedKey::ArrowDown) => {
-                let dir = if matches!(ev.logical_key, Key::Named(NamedKey::ArrowDown)) { 1 } else { -1 };
+    /// A key went down.
+    pub fn on_key(&mut self, key: Key) {
+        let ctrl = self.mods.ctrl;
+        let shift = self.mods.shift;
+        match key {
+            Key::Space => self.play(),
+            Key::Left if ctrl => self.jump(-5.0),
+            Key::Right if ctrl => self.jump(5.0),
+            Key::Left if shift => self.jump(-1.0),
+            Key::Right if shift => self.jump(1.0),
+            Key::Left => self.step_frame(-1),
+            Key::Right => self.step_frame(1),
+            Key::Up | Key::Down => {
+                let dir = if key == Key::Down { 1 } else { -1 };
                 if let Some(t) = self.doc.as_ref().and_then(|d| split::step(&d.plan.edges(), self.playhead, dir)) {
                     self.seek(t);
                 }
             }
-            Key::Named(NamedKey::PageUp) | Key::Named(NamedKey::PageDown) => {
-                let dir = if matches!(ev.logical_key, Key::Named(NamedKey::PageDown)) { 1 } else { -1 };
+            Key::PageUp | Key::PageDown => {
+                let dir = if key == Key::PageDown { 1 } else { -1 };
                 if let Some(t) = self.doc.as_ref().and_then(|d| split::step(&d.info.keys, self.playhead, dir)) {
                     self.seek(t);
                 }
             }
-            Key::Named(NamedKey::Home) => self.seek(Duration::ZERO),
-            Key::Named(NamedKey::End) => self.seek(self.duration()),
-            Key::Named(NamedKey::Delete) | Key::Named(NamedKey::Backspace) => self.remove_at_playhead(),
-            Key::Named(NamedKey::Escape) => {
+            Key::Home => self.seek(Duration::ZERO),
+            Key::End => self.seek(self.duration()),
+            Key::Delete | Key::Backspace => self.remove_at_playhead(),
+            Key::Escape => {
                 if self.toast.is_some() {
                     self.toast = None;
                     self.redraw();
@@ -687,41 +700,36 @@ impl App {
                     self.pause();
                 }
             }
-            Key::Named(NamedKey::Enter) if ctrl => self.export(),
-            Key::Character(c) => {
-                let c = c.to_lowercase();
-                match c.as_str() {
-                    "o" if ctrl => self.open_dialog(),
-                    "e" | "s" if ctrl => self.export(),
-                    "q" | "w" if ctrl => el.exit(),
-                    "k" => self.play(),
-                    "j" => self.jump(-1.0),
-                    "l" => self.jump(1.0),
-                    "," => self.step_frame(-1),
-                    "." => self.step_frame(1),
-                    "i" | "[" => self.act(Act::MarkIn),
-                    "o" | "]" => self.act(Act::MarkOut),
-                    "s" | "c" => self.act(Act::Cut),
-                    "x" => self.remove_at_playhead(),
-                    "m" => self.act(Act::Mute),
-                    "n" => self.act(Act::Snap),
-                    "0" => self.act(Act::ClearCuts),
-                    "=" | "+" => self.zoom(1.0 / 1.5, self.playhead),
-                    "-" | "_" => self.zoom(1.5, self.playhead),
-                    "\\" => self.zoom(1e9, self.playhead),
-                    d if d.len() == 1 && ('2'..='9').contains(&d.chars().next().unwrap_or(' ')) => {
-                        self.act(Act::Preset(d.parse().unwrap_or(2)));
-                    }
-                    _ => {}
-                }
-            }
-            _ => {}
+            Key::Enter if ctrl => self.export(),
+            Key::Enter | Key::F1 => {}
+            Key::Char(c) => match c {
+                'o' if ctrl => self.open_dialog(),
+                'e' | 's' if ctrl => self.export(),
+                'q' | 'w' if ctrl => self.quit = true,
+                'k' => self.play(),
+                'j' => self.jump(-1.0),
+                'l' => self.jump(1.0),
+                ',' => self.step_frame(-1),
+                '.' => self.step_frame(1),
+                'i' | '[' => self.act(Act::MarkIn),
+                'o' | ']' => self.act(Act::MarkOut),
+                's' | 'c' => self.act(Act::Cut),
+                'x' => self.remove_at_playhead(),
+                'm' => self.act(Act::Mute),
+                'n' => self.act(Act::Snap),
+                '0' => self.act(Act::ClearCuts),
+                '=' | '+' => self.zoom(1.0 / 1.5, self.playhead),
+                '-' | '_' => self.zoom(1.5, self.playhead),
+                '\\' => self.zoom(1e9, self.playhead),
+                '2'..='9' => self.act(Act::Preset(c as usize - '0' as usize)),
+                _ => {}
+            },
         }
     }
 
-    fn mouse_down(&mut self, button: MouseButton) {
+    fn mouse_down(&mut self, button: Button) {
         let (x, y) = self.mouse;
-        if button == MouseButton::Right {
+        if button == Button::Right {
             if let Some(Marker::Cut(i)) = self.marker_at(x, y) {
                 if let Some(d) = &mut self.doc {
                     d.plan.remove_cut(i);
@@ -730,15 +738,12 @@ impl App {
             }
             return;
         }
-        if button == MouseButton::Middle {
+        if button == Button::Middle {
             if let Some(d) = &self.doc {
                 if self.l.card.contains(x, y) {
                     self.drag = Some(Drag::Pan(x, d.view.0, d.view.1));
                 }
             }
-            return;
-        }
-        if button != MouseButton::Left {
             return;
         }
         if let Some(a) = self.hit(x, y) {
@@ -791,9 +796,9 @@ impl App {
         }
     }
 
-    fn mouse_up(&mut self, button: MouseButton) {
+    fn mouse_up(&mut self, button: Button) {
         let (x, y) = self.mouse;
-        if button == MouseButton::Left {
+        if button == Button::Left {
             if let Some(a) = self.pressed.take() {
                 if self.hit(x, y) == Some(a) {
                     self.act(a);
@@ -815,27 +820,27 @@ impl App {
         self.hits.iter().rev().find(|h| h.0.contains(x, y)).map(|h| h.1)
     }
 
-    fn cursor(&self) -> CursorIcon {
+    fn cursor(&self) -> CursorKind {
         let (x, y) = self.mouse;
         if matches!(self.drag, Some(Drag::Marker(_))) || (self.drag.is_none() && self.marker_at(x, y).is_some()) {
-            return CursorIcon::EwResize;
+            return CursorKind::EwResize;
         }
         if matches!(self.drag, Some(Drag::Pan(..))) {
-            return CursorIcon::Grabbing;
+            return CursorKind::Grabbing;
         }
         if self.hit(x, y).is_some() {
-            return CursorIcon::Pointer;
+            return CursorKind::Pointer;
         }
-        CursorIcon::Default
+        CursorKind::Default
     }
 
     // --- painting ------------------------------------------------------------
 
-    fn paint(&mut self) {
-        let Some(window) = self.window.clone() else { return };
-        let size = window.inner_size();
-        let (w, h) = (size.width.max(1), size.height.max(1));
-        let s = window.scale_factor() as f32;
+    /// Draw what changed; the frame.
+    pub fn paint(&mut self) -> Frame<'_> {
+        let (w, h) = self.host.size();
+        let (w, h) = (w.max(1), h.max(1));
+        let s = self.host.scale();
         self.l = layout(w as f32, h as f32, s);
         let mut canvas = std::mem::take(&mut self.canvas);
         canvas.resize(w as usize * h as usize * 4, 0);
@@ -846,21 +851,10 @@ impl App {
             let mut c = Canvas { fb, text: &mut text, s, stage: self.theme.stage };
             self.draw(&mut c);
         }
-        if let Some(surface) = &mut self.surface {
-            if let (Some(nw), Some(nh)) = (NonZeroU32::new(w), NonZeroU32::new(h)) {
-                if surface.resize(nw, nh).is_ok() {
-                    if let Ok(mut buf) = surface.buffer_mut() {
-                        for (o, p) in buf.iter_mut().zip(canvas.chunks_exact(4)) {
-                            *o = p[0] as u32 | (p[1] as u32) << 8 | (p[2] as u32) << 16;
-                        }
-                        let _ = buf.present();
-                    }
-                }
-            }
-        }
         self.canvas = canvas;
         self.text = Some(text);
         self.last_paint = Instant::now();
+        Frame { w, h, bgra: &self.canvas }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1581,33 +1575,6 @@ enum Style {
     Round,
 }
 
-/// Give the native title bar the app's colours (Windows 11; earlier versions
-/// ignore what they do not know and keep theirs).
-#[cfg(windows)]
-fn tint_title_bar(window: &Window, t: &Theme) {
-    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    #[link(name = "dwmapi")]
-    unsafe extern "system" {
-        fn DwmSetWindowAttribute(hwnd: isize, attribute: u32, value: *const std::ffi::c_void, size: u32) -> i32;
-    }
-    const USE_IMMERSIVE_DARK_MODE: u32 = 20;
-    const BORDER_COLOR: u32 = 34;
-    const CAPTION_COLOR: u32 = 35;
-    const TEXT_COLOR: u32 = 36;
-    let Ok(handle) = window.window_handle() else { return };
-    let RawWindowHandle::Win32(h) = handle.as_raw() else { return };
-    let colorref = |c: C| c.r as u32 | (c.g as u32) << 8 | (c.b as u32) << 16;
-    for (attribute, value) in
-        [(USE_IMMERSIVE_DARK_MODE, u32::from(t.dark)), (CAPTION_COLOR, colorref(t.bg)), (TEXT_COLOR, colorref(t.text)), (BORDER_COLOR, colorref(t.bg))]
-    {
-        // SAFETY: the window is alive, and `value` outlives the call and is the 4 bytes given.
-        let _ = unsafe { DwmSetWindowAttribute(h.hwnd.get(), attribute, (&raw const value).cast(), 4) };
-    }
-}
-
-#[cfg(not(windows))]
-fn tint_title_bar(_: &Window, _: &Theme) {}
-
 fn file_name(p: &Path) -> String {
     p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
@@ -1693,51 +1660,9 @@ fn round_corners_top(c: &mut Canvas, r: Rect, rad: f32, bg: C) {
     }
 }
 
-impl ApplicationHandler<UserEvent> for App {
-    fn resumed(&mut self, el: &ActiveEventLoop) {
-        if self.window.is_some() {
-            return;
-        }
-        let attrs = Window::default_attributes()
-            .with_title("MP4 Splitter")
-            .with_inner_size(LogicalSize::new(1180.0, 780.0))
-            .with_min_inner_size(LogicalSize::new(760.0, 560.0));
-        #[cfg(windows)]
-        let attrs = {
-            use winit::platform::windows::{IconExtWindows, WindowAttributesExtWindows};
-            // The icon embedded by build.rs: title bar and Alt+Tab, then the taskbar.
-            let icon = |_: ()| winit::window::Icon::from_resource(1, None).ok();
-            attrs.with_window_icon(icon(())).with_taskbar_icon(icon(()))
-        };
-        let window = match el.create_window(attrs) {
-            Ok(w) => Rc::new(w),
-            Err(e) => {
-                eprintln!("no window: {e}");
-                el.exit();
-                return;
-            }
-        };
-        self.theme = theme::pick(window.theme());
-        tint_title_bar(&window, &self.theme);
-        let ctx = match softbuffer::Context::new(window.clone()) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("no drawing surface: {e}");
-                el.exit();
-                return;
-            }
-        };
-        self.surface = softbuffer::Surface::new(&ctx, window.clone()).ok();
-        let size = window.inner_size();
-        self.l = layout(size.width as f32, size.height as f32, window.scale_factor() as f32);
-        self.window = Some(window);
-        if let Some(p) = self.pending_open.take() {
-            self.open(&p);
-        }
-        self.redraw();
-    }
-
-    fn user_event(&mut self, _el: &ActiveEventLoop, _ev: UserEvent) {
+impl App {
+    /// Something finished on another thread.
+    pub fn on_wake(&mut self) {
         // A still arrived?
         if let Some(d) = &mut self.doc {
             let got = d.stills.done.lock().ok().and_then(|mut g| g.take());
@@ -1747,100 +1672,102 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
         }
+        let answer = self.dialog.lock().unwrap_or_else(|e| e.into_inner()).take();
+        match answer {
+            Some(Dialog::Open(Some(p))) => self.open(&p),
+            Some(Dialog::ExportTo(Some(dir))) => self.export_to(dir),
+            _ => {}
+        }
         self.check_export();
         self.redraw();
     }
 
-    fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, ev: WindowEvent) {
-        match ev {
-            WindowEvent::CloseRequested => el.exit(),
-            WindowEvent::RedrawRequested => self.paint(),
-            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
-                if let Some(w) = &self.window {
-                    let size = w.inner_size();
-                    self.l = layout(size.width as f32, size.height as f32, w.scale_factor() as f32);
-                }
-                if self.playing.is_none() {
-                    self.request_still();
-                }
-                self.redraw();
+    /// The window's size or scale changed.
+    pub fn on_resize(&mut self) {
+        let (w, h) = self.host.size();
+        self.l = layout(w as f32, h as f32, self.host.scale());
+        if self.playing.is_none() {
+            self.request_still();
+        }
+        self.redraw();
+    }
+
+    /// The OS's theme changed.
+    pub fn on_theme(&mut self, dark: Option<bool>) {
+        self.theme = theme::pick(dark);
+        self.host.set_colors(&self.theme);
+        self.redraw();
+    }
+
+    pub fn on_mods(&mut self, m: Mods) {
+        self.mods = m;
+    }
+
+    /// The pointer moved, in the window.
+    pub fn on_move(&mut self, x: f32, y: f32) {
+        let before = self.hit(self.mouse.0, self.mouse.1);
+        self.mouse = (x, y);
+        let now = self.hit(x, y);
+        if now != before {
+            self.hover = now;
+            self.hover_since = Instant::now();
+        }
+        if self.drag.is_some() {
+            self.drag_to(x);
+        }
+        self.host.set_cursor(self.cursor());
+        self.redraw();
+    }
+
+    /// The pointer left the window.
+    pub fn on_leave(&mut self) {
+        self.mouse = (-1.0, -1.0);
+        self.redraw();
+    }
+
+    pub fn on_button(&mut self, b: Button, down: bool) {
+        if down { self.mouse_down(b) } else { self.mouse_up(b) }
+    }
+
+    /// The wheel turned: lines, up and right positive.
+    pub fn on_wheel(&mut self, dx: f64, dy: f64) {
+        let (mx, my) = self.mouse;
+        if self.l.card.contains(mx, my) {
+            if self.mods.shift || dx.abs() > dy.abs() {
+                let by = if dx.abs() > dy.abs() { -dx } else { -dy };
+                self.pan(by as f32 * 60.0 * self.l.s);
+            } else {
+                let at = self.t_of(mx);
+                self.zoom(1.2f64.powf(-dy), at);
             }
-            WindowEvent::ThemeChanged(th) => {
-                self.theme = theme::pick(Some(th));
-                if let Some(w) = &self.window {
-                    tint_title_bar(w, &self.theme);
-                }
-                self.redraw();
-            }
-            WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
-            WindowEvent::KeyboardInput { event, .. } => self.key(&event, el),
-            WindowEvent::CursorMoved { position, .. } => {
-                let p = (position.x as f32, position.y as f32);
-                let before = self.hit(self.mouse.0, self.mouse.1);
-                self.mouse = p;
-                let now = self.hit(p.0, p.1);
-                if now != before {
-                    self.hover = now;
-                    self.hover_since = Instant::now();
-                }
-                if self.drag.is_some() {
-                    self.drag_to(p.0);
-                }
-                if let Some(w) = &self.window {
-                    w.set_cursor(self.cursor());
-                }
-                self.redraw();
-            }
-            WindowEvent::CursorLeft { .. } => {
-                self.mouse = (-1.0, -1.0);
-                self.redraw();
-            }
-            WindowEvent::MouseInput { state, button, .. } => match state {
-                ElementState::Pressed => self.mouse_down(button),
-                ElementState::Released => self.mouse_up(button),
-            },
-            WindowEvent::MouseWheel { delta, .. } => {
-                let (dx, dy) = match delta {
-                    MouseScrollDelta::LineDelta(x, y) => (x as f64, y as f64),
-                    MouseScrollDelta::PixelDelta(p) => (p.x / 40.0, p.y / 40.0),
-                };
-                let (mx, my) = self.mouse;
-                if self.l.card.contains(mx, my) {
-                    if self.mods.shift_key() || dx.abs() > dy.abs() {
-                        let by = if dx.abs() > dy.abs() { -dx } else { -dy };
-                        self.pan(by as f32 * 60.0 * self.l.s);
-                    } else {
-                        let at = self.t_of(mx);
-                        self.zoom(1.2f64.powf(-dy), at);
-                    }
-                } else if self.l.preview.contains(mx, my) && self.doc.is_some() && dy != 0.0 {
-                    // Over the picture: frame by frame.
-                    self.step_frame(if dy < 0.0 { 1 } else { -1 });
-                }
-            }
-            WindowEvent::HoveredFile(_) => {
-                self.drop_hover = true;
-                self.redraw();
-            }
-            WindowEvent::HoveredFileCancelled => {
-                self.drop_hover = false;
-                self.redraw();
-            }
-            WindowEvent::DroppedFile(p) => {
-                self.drop_hover = false;
-                self.open(&p);
-            }
-            _ => {}
+        } else if self.l.preview.contains(mx, my) && self.doc.is_some() && dy != 0.0 {
+            // Over the picture: frame by frame.
+            self.step_frame(if dy < 0.0 { 1 } else { -1 });
         }
     }
 
-    fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+    /// A file is being dragged over the window, or no longer.
+    pub fn on_hover_file(&mut self, on: bool) {
+        self.drop_hover = on;
+        self.redraw();
+    }
+
+    /// A file was dropped on the window.
+    pub fn on_drop(&mut self, p: &Path) {
+        self.drop_hover = false;
+        self.open(p);
+    }
+
+    /// Between events: playback moves on. When to come back, and whether to quit.
+    pub fn tick(&mut self) -> Tick {
+        if self.quit {
+            return Tick { wait: None, exit: true };
+        }
         if self.autoclose.is_some_and(|t| Instant::now() >= t) {
             if let Ok(dir) = std::env::var("MP4_SPLITTER_SCREENSHOT") {
                 self.screenshot(Path::new(&dir));
             }
-            el.exit();
-            return;
+            return Tick { wait: None, exit: true };
         }
         // Playing into a piece that is switched off: on to the next kept one,
         // or stop when none is left.
@@ -1893,24 +1820,18 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(t) = &self.toast {
             earliest(&mut wait, t.at + Duration::from_secs(if t.error { 9 } else { 12 }) + Duration::from_millis(20));
         }
-        el.set_control_flow(match wait {
-            Some(t) => ControlFlow::WaitUntil(t),
-            None => ControlFlow::Wait,
-        });
         if self.toast.as_ref().is_some_and(|t| t.at.elapsed() > Duration::from_secs(if t.error { 9 } else { 12 })) {
             self.redraw();
         }
         if self.hover.is_some() && self.hover_since.elapsed() >= Duration::from_millis(550) && self.hover_since.elapsed() < Duration::from_millis(700) {
             self.redraw();
         }
+        Tick { wait, exit: false }
     }
-}
 
-impl App {
-    /// Save what the window shows as a PNG in `dir` (docs and CI).
     fn screenshot(&mut self, dir: &Path) {
         self.paint();
-        let (w, h) = self.window.as_ref().map_or((0, 0), |w| (w.inner_size().width, w.inner_size().height));
+        let (w, h) = self.host.size();
         if w > 0 && self.canvas.len() == w as usize * h as usize * 4 {
             let name = std::env::var("MP4_SPLITTER_SCREENSHOT_NAME").unwrap_or_else(|_| "screenshot.png".into());
             if let Err(e) = std::fs::write(dir.join(name), crate::paint::png(w, h, &self.canvas)) {

@@ -5,6 +5,7 @@
 
 use crate::audio::{self, Output};
 use crate::ffmpeg::{self, Picture, Proc};
+use crate::shell::Wake;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::PathBuf;
@@ -12,8 +13,6 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
-
-pub type Wake = Arc<dyn Fn() + Send + Sync>;
 
 /// The file being worked on, as the workers need it.
 #[derive(Clone)]

@@ -91,13 +91,16 @@ pub const LIGHT: Theme = Theme {
 };
 
 /// `MP4_SPLITTER_THEME=light|dark` first, then the OS (dark when unknown).
-pub fn pick(os: Option<winit::window::Theme>) -> Theme {
+pub fn pick(os_dark: Option<bool>) -> Theme {
     match std::env::var("MP4_SPLITTER_THEME").ok().as_deref() {
         Some("light") => LIGHT,
         Some("dark") => DARK,
-        _ => match os {
-            Some(winit::window::Theme::Light) => LIGHT,
-            _ => DARK,
-        },
+        _ => {
+            if os_dark == Some(false) {
+                LIGHT
+            } else {
+                DARK
+            }
+        }
     }
 }

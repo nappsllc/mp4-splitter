@@ -16,6 +16,8 @@ mod paint;
 mod player;
 #[allow(dead_code)]
 mod raster;
+mod shell;
+mod shell_winit;
 mod split;
 mod theme;
 #[allow(dead_code)]
@@ -56,16 +58,8 @@ fn main() {
         return;
     }
     let open = args.iter().find(|a| !a.starts_with('-')).map(PathBuf::from);
-    let event_loop = match winit::event_loop::EventLoop::<app::UserEvent>::with_user_event().build() {
-        Ok(el) => el,
-        Err(e) => {
-            eprintln!("error: can't open a window: {e}");
-            std::process::exit(1);
-        }
-    };
-    let mut app = app::App::new(event_loop.create_proxy(), open);
-    if let Err(e) = event_loop.run_app(&mut app) {
-        eprintln!("error: {e}");
+    if let Err(e) = shell_winit::run(open) {
+        eprintln!("error: can't open a window: {e}");
         std::process::exit(1);
     }
 }
