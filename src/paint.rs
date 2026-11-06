@@ -156,6 +156,11 @@ impl Canvas<'_> {
         self.fb.fill_circle(x, y, rad, c.c4());
     }
 
+    /// A circle's outline.
+    pub fn ring(&mut self, x: f32, y: f32, rad: f32, width: f32, c: C) {
+        self.fb.stroke_circle(x, y, rad, width, c.c4());
+    }
+
     pub fn line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, c: C) {
         self.fb.surf().stroke_polyline(&[Pt::new(x0, y0), Pt::new(x1, y1)], width, c.c4(), Blend::Normal);
     }
@@ -355,6 +360,11 @@ impl Canvas<'_> {
                 strokes.push(poly(&[(9.0, 14.0), (4.0, 9.0), (9.0, 4.0)], false));
                 strokes.push(poly(&[(4.0, 9.0), (14.5, 9.0), (18.0, 10.5), (20.0, 14.0), (18.0, 17.5), (14.5, 20.0), (11.0, 20.0)], false));
             }
+            Icon::Info => {
+                rings.push((12.0, 12.0, 9.5));
+                strokes.push(poly(&[(12.0, 11.5), (12.0, 16.5)], false));
+                dots.push((12.0, 7.7, 1.3));
+            }
             Icon::Minus => strokes.push(poly(&[(6.0, 12.0), (18.0, 12.0)], false)),
             Icon::Plus => {
                 strokes.push(poly(&[(6.0, 12.0), (18.0, 12.0)], false));
@@ -409,6 +419,7 @@ pub enum Icon {
     KeyFrame,
     Trash,
     Film,
+    Info,
     Minus,
     Plus,
     Close,

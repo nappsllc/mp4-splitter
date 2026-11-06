@@ -17,6 +17,7 @@ mod export;
 mod ffmpeg;
 #[allow(dead_code)]
 mod fonts;
+mod links;
 #[cfg(windows)]
 mod mf;
 mod mp4;

@@ -59,6 +59,7 @@ without re-encoding.** Windows, macOS and Linux. Apache-2.0.
 | <kbd>N</kbd> | Snap to key frames |
 | <kbd>M</kbd> | Mute |
 | <kbd>+</kbd> <kbd>-</kbd> <kbd>\</kbd> | Zoom in / out / show everything |
+| <kbd>F1</kbd> | About |
 | <kbd>Ctrl</kbd>+<kbd>O</kbd> | Open (or drop a file on the window) |
 | <kbd>Ctrl</kbd>+<kbd>E</kbd> | Export next to the video (<kbd>Shift</kbd>+click Export: choose a folder) |
 
