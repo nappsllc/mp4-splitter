@@ -122,6 +122,10 @@ The cutting code (`src/mp4.rs`), the renderer and the Windows layers are adapted
 from [Rustshot](https://github.com/nappsllc/rustshot). Files must be plain
 (not fragmented) MP4, M4V or MOV; fragmented files are refused with a message.
 
+## Privacy
+
+It collects nothing. The one network request is the update check; see [PRIVACY.md](PRIVACY.md).
+
 ## License
 
 [Apache License 2.0](LICENSE); see [NOTICE](NOTICE). The Inter font is under
