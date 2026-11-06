@@ -1,6 +1,7 @@
 //! Design tokens, dark and light (Rustshot's palette: periwinkle accent,
 //! soft surfaces), picked from the OS setting.
 
+use crate::config::ThemeChoice;
 use crate::paint::{C, hex};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -90,17 +91,69 @@ pub const LIGHT: Theme = Theme {
     tooltip_text: hex(0xF2F3F6, 255),
 };
 
-/// `MP4_SPLITTER_THEME=light|dark` first, then the OS (dark when unknown).
-pub fn pick(os_dark: Option<bool>) -> Theme {
-    match std::env::var("MP4_SPLITTER_THEME").ok().as_deref() {
+/// The accents one can choose (as Rustshot's): the shade for the dark theme,
+/// and for the light. The first is the theme's own.
+pub const ACCENTS: [(C, C); 3] = [
+    (DARK.accent, LIGHT.accent),
+    (hex(0x5CC8C2, 255), hex(0x16897F, 255)), // teal
+    (hex(0xF2A65A, 255), hex(0xB8661A, 255)), // amber
+];
+
+impl Theme {
+    /// This theme with accent number `i`.
+    pub fn with_accent(mut self, i: usize) -> Theme {
+        let (dark, light) = ACCENTS[if i < ACCENTS.len() { i } else { 0 }];
+        let c = if self.dark { dark } else { light };
+        if c == self.accent {
+            return self;
+        }
+        let lift = |v: u8| if self.dark { v.saturating_add(23) } else { v.saturating_sub(17) };
+        self.accent = c;
+        self.accent_hover = C { r: lift(c.r), g: lift(c.g), b: lift(c.b), a: 255 };
+        self.accent_soft = c.with_alpha(if self.dark { 46 } else { 36 });
+        self
+    }
+}
+
+/// `MP4_SPLITTER_THEME=light|dark` first, then the choice, then the OS (dark
+/// when unknown).
+pub fn pick(os_dark: Option<bool>, choice: ThemeChoice, accent: usize) -> Theme {
+    let base = match std::env::var("MP4_SPLITTER_THEME").ok().as_deref() {
         Some("light") => LIGHT,
         Some("dark") => DARK,
-        _ => {
-            if os_dark == Some(false) {
-                LIGHT
-            } else {
-                DARK
+        _ => match choice {
+            ThemeChoice::Dark => DARK,
+            ThemeChoice::Light => LIGHT,
+            ThemeChoice::System => {
+                if os_dark == Some(false) {
+                    LIGHT
+                } else {
+                    DARK
+                }
             }
-        }
+        },
+    };
+    base.with_accent(accent)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_choice_beats_the_os() {
+        assert!(pick(Some(true), ThemeChoice::Light, 0) == LIGHT);
+        assert!(pick(Some(false), ThemeChoice::Dark, 0) == DARK);
+        assert!(pick(Some(false), ThemeChoice::System, 0) == LIGHT);
+        assert!(pick(Some(true), ThemeChoice::System, 0) == DARK);
+        assert!(pick(None, ThemeChoice::System, 0) == DARK);
+    }
+
+    #[test]
+    fn accents_follow_the_theme_and_a_bad_number_is_the_default() {
+        assert_eq!(pick(None, ThemeChoice::Dark, 1).accent, ACCENTS[1].0);
+        assert_eq!(pick(None, ThemeChoice::Light, 1).accent, ACCENTS[1].1);
+        assert!(pick(None, ThemeChoice::Dark, 99) == DARK);
+        assert_eq!(pick(None, ThemeChoice::Dark, 2).accent_soft.a, 46);
     }
 }

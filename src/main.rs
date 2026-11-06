@@ -8,6 +8,7 @@ mod audio;
 #[cfg(windows)]
 #[path = "audio_win.rs"]
 mod audio;
+mod config;
 mod deflate;
 #[cfg(windows)]
 mod dialogs;
