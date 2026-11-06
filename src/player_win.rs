@@ -3,9 +3,9 @@
 //! thumbnails and the waveform. Each keeps its own reader open and seeks in
 //! place, on its own thread, and wakes the window when it has something new.
 //!
-//! Media Foundation ignores edit lists: it gives a frame its composition time
-//! in the file, so a time on the timeline is `t + zero` in its clock
-//! ([`crate::mp4::Info::zero`]).
+//! The readers' times are the file's media timeline, whatever the system's
+//! MP4 source does with edit lists ([`VideoReader::open`]), so a time on the
+//! timeline is `t + zero` there ([`crate::mp4::Info::zero`]).
 
 use crate::audio::{self, Output};
 use crate::mf::{AudioReader, Decoded, VideoReader};
@@ -49,6 +49,8 @@ pub struct Source {
     has_frames: bool,
     zero: i64,
     audio_zero: i64,
+    /// The first picture's media time (see [`VideoReader::open`]).
+    first: i64,
     turn: u8,
     /// Half a frame (100 ns): how near a picture's time must be.
     half: i64,
@@ -85,6 +87,7 @@ impl Source {
             has_frames: !info.frames.is_empty(),
             zero: hns(info.zero),
             audio_zero: hns(info.audio_zero),
+            first: hns(info.first),
             turn: info.turn,
             half: (5_000_000.0 / info.fps()) as i64,
             decoder: Arc::default(),
@@ -97,7 +100,7 @@ impl Source {
         let mut g = self.decoder.slot.lock().unwrap_or_else(|e| e.into_inner());
         if g.v.is_none() {
             // On the GPU where it can be.
-            g.v = VideoReader::open(&self.path, self.gpu, self.turn).or_else(|_| VideoReader::open(&self.path, false, self.turn)).ok();
+            g.v = VideoReader::open(&self.path, self.gpu, self.turn, self.first).or_else(|_| VideoReader::open(&self.path, false, self.turn, self.first)).ok();
             g.at = None;
         }
         g.used = Some(Instant::now());
@@ -534,12 +537,12 @@ pub fn load_peaks(src: &Source, wake: Wake) -> Arc<Mutex<Vec<f32>>> {
             let per = (a.rate / PEAKS_PER_SEC).max(1) as usize * a.channels.max(1) as usize;
             let mut peaks = Vec::<f32>::new();
             let (mut peak, mut n) = (0f32, 0usize);
-            // What the edit list hides at the start.
-            let mut skip = (zero.max(0) as u128 * a.rate as u128 / 10_000_000) as usize * a.channels.max(1) as usize;
+            let ch = a.channels.max(1) as usize;
             let mut last = Instant::now();
-            while let Some((_, pcm)) = a.next() {
-                let from = skip.min(pcm.len());
-                skip -= from;
+            while let Some((ts, pcm)) = a.next() {
+                // What the edit list hides at the start.
+                let early = ((zero - ts).max(0) as u128 * a.rate as u128 / 10_000_000) as usize * ch;
+                let from = early.min(pcm.len());
                 for v in &pcm[from..] {
                     peak = peak.max(v.abs());
                     n += 1;
@@ -637,6 +640,28 @@ mod tests {
                 assert_eq!(number(&got), first + k as u32, "{} (gpu {gpu}): frame {k}", p.display());
             }
         }
+    }
+
+    /// The readers' clock is the file's on any system: the first picture and
+    /// the first sound are where the file says, read straight away or after
+    /// going back to the start.
+    #[test]
+    fn readers_keep_the_files_time() {
+        let Some(ff) = crate::ffmpeg::find() else { return };
+        let dir = std::env::temp_dir().join(format!("mp4s-clock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = fixture(&ff, &dir);
+        let i = info(&p);
+        let first = hns(i.first);
+        for gpu in [true, false] {
+            let mut v = VideoReader::open(&p, gpu, 0, first).unwrap();
+            assert_eq!(v.next().unwrap().ts, first, "gpu {gpu}");
+            v.seek(first).unwrap();
+            assert_eq!(v.next().unwrap().ts, first, "gpu {gpu}, after seeking");
+        }
+        let mut a = AudioReader::open(&p).unwrap();
+        assert_eq!(a.next().unwrap().0, 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
