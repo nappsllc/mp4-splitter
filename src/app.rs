@@ -34,6 +34,9 @@ const ALL: u8 = HEADER | PREVIEW | CONTROLS | TIMELINE;
 /// Hits of what floats over the bands (the toast): redone with any paint.
 const OVER: u8 = 16;
 
+/// The corners of the preview and the picture in it, in logical pixels.
+const PREVIEW_RADIUS: f32 = 12.0;
+
 /// What a file dialog came back with, waiting for the app's thread.
 enum Dialog {
     Open(Option<PathBuf>),
@@ -387,12 +390,12 @@ impl App {
     fn video_size(&self) -> (u32, u32) {
         let Some(d) = &self.doc else { return (0, 0) };
         let (vw, vh) = d.info.size.unwrap_or((16, 9));
-        let r = fit(vw as f32, vh as f32, self.l.preview);
-        // Never larger than the video; even sizes keep ffmpeg's scaler happy.
-        let k = (r.w / vw as f32).min(1.0);
-        let w = ((vw as f32 * k).round() as u32).max(2) & !1;
-        let h = ((vh as f32 * k).round() as u32).max(2) & !1;
-        (w, h)
+        let (r, _) = picture_rect(vw as f32, vh as f32, self.l.preview);
+        // Exactly the rectangle it is shown in, so it is copied pixel for pixel;
+        // never larger than the video (it is scaled up on screen then).
+        let (w, h) = if r.w >= vw as f32 { (vw, vh) } else { (r.w as u32, r.h as u32) };
+        // ffmpeg's scaler wants even sizes.
+        if cfg!(windows) { (w.max(2), h.max(2)) } else { (w.max(2) & !1, h.max(2) & !1) }
     }
 
     fn request_still(&mut self) {
@@ -905,7 +908,7 @@ impl App {
             let row = w as usize * 4;
             let Some(pixels) = canvas.get_mut(y0 as usize * row..y1 as usize * row) else { continue };
             let fb = Fb::with_origin(pixels, w as usize, 0, y0 as i32, Order::Bgra);
-            let mut c = Canvas { fb, text: &mut text, s, stage: self.theme.stage };
+            let mut c = Canvas { fb, text: &mut text, s };
             self.draw(&mut c, part);
         }
         self.canvas = canvas;
@@ -1006,8 +1009,14 @@ impl App {
         }
         if part & PREVIEW != 0 {
             self.part = PREVIEW;
-            // The stage.
-            c.rrect(l.preview, 12.0 * s, t.stage);
+            // The stage: only where a picture leaves bars for it.
+            let fills = self.doc.as_ref().is_some_and(|d| {
+                let (vw, vh) = d.info.size.unwrap_or((16, 9));
+                d.frame.is_some() && picture_rect(vw as f32, vh as f32, l.preview).1
+            });
+            if !fills {
+                c.rrect(snapped(l.preview), PREVIEW_RADIUS * s, t.stage);
+            }
             self.draw_preview(c);
         }
         if self.doc.is_some() {
@@ -1144,12 +1153,11 @@ impl App {
             return;
         };
         let (vw, vh) = d.info.size.unwrap_or((16, 9));
-        let r = fit(vw as f32, vh as f32, l.preview.inset(0.0, 0.0));
-        let r = Rect::new(r.x.round(), r.y.round(), r.w.round(), r.h.round());
+        let (r, _) = picture_rect(vw as f32, vh as f32, l.preview);
         match &d.frame {
-            Some((_, img)) => c.image(img, r, Some((r, 10.0 * s))),
+            Some((_, img)) => c.image(img, r, Some((r, PREVIEW_RADIUS * s))),
             None => {
-                c.rrect(r, 10.0 * s, crate::paint::hex(0xFFFFFF, 6));
+                c.rrect(r, PREVIEW_RADIUS * s, crate::paint::hex(0xFFFFFF, 6));
                 let msg = if d.info.frames.is_empty() {
                     "No video track (sound only)"
                 } else if !d.src.available {
@@ -1672,6 +1680,24 @@ fn fit(w: f32, h: f32, r: Rect) -> Rect {
     Rect::new(r.cx() - fw / 2.0, r.cy() - fh / 2.0, fw, fh)
 }
 
+/// `r` on whole pixels.
+fn snapped(r: Rect) -> Rect {
+    let (x0, y0) = (r.x.round(), r.y.round());
+    Rect::new(x0, y0, r.right().round() - x0, r.bottom().round() - y0)
+}
+
+/// Where a `w` × `h` picture goes in the preview `p`: on whole pixels, sharing
+/// the preview's edges wherever it reaches them (bars of a pixel or two are
+/// not worth showing). The one rectangle for the picture, its corners and what
+/// is behind it; and whether it covers the preview altogether.
+fn picture_rect(w: f32, h: f32, p: Rect) -> (Rect, bool) {
+    let p = snapped(p);
+    let f = snapped(fit(w, h, p));
+    let (full_w, full_h) = (p.w - f.w <= 2.0, p.h - f.h <= 2.0);
+    let r = Rect::new(if full_w { p.x } else { f.x }, if full_h { p.y } else { f.y }, if full_w { p.w } else { f.w }, if full_h { p.h } else { f.h });
+    (r, full_w && full_h)
+}
+
 /// A step between labelled ticks that leaves them ~90 logical px apart.
 fn nice_tick(span: f64, width_logical: f64) -> f64 {
     let want = span * 90.0 / width_logical.max(1.0);
@@ -1925,5 +1951,44 @@ impl App {
                 eprintln!("screenshot: {e}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_picture_rectangle_stays_on_the_preview_at_any_scale() {
+        for scale in [1.0, 1.25, 1.5, 1.75, 2.0] {
+            for (ww, wh) in [(1180.0, 780.0), (1181.0, 781.0), (760.0, 560.0), (1919.0, 1033.0)] {
+                let l = layout(ww * scale, wh * scale, scale);
+                let p = snapped(l.preview);
+                for (vw, vh) in [(1920.0, 1080.0), (1148.0, 430.0), (1920.0, 720.0), (1080.0, 1920.0), (640.0, 480.0)] {
+                    let (r, fills) = picture_rect(vw, vh, l.preview);
+                    // Whole pixels, inside the preview.
+                    for v in [r.x, r.y, r.w, r.h] {
+                        assert_eq!(v, v.round(), "{r:?} at {scale}");
+                    }
+                    assert!(r.x >= p.x && r.y >= p.y && r.right() <= p.right() && r.bottom() <= p.bottom(), "{r:?} in {p:?} at {scale}");
+                    // Touching along at least one axis, exactly.
+                    assert!((r.x == p.x && r.w == p.w) || (r.y == p.y && r.h == p.h), "{r:?} in {p:?} at {scale}");
+                    assert_eq!(fills, r == p);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_picture_of_the_previews_shape_covers_it() {
+        let p = Rect::new(16.0, 56.0, 1148.0, 430.0);
+        assert_eq!(picture_rect(1148.0, 430.0, p), (p, true));
+        // A hair off: still no bars of a pixel.
+        assert_eq!(picture_rect(1920.0, 720.0, p), (p, true));
+        // Really narrower: bars at the sides, and top and bottom shared.
+        let (r, fills) = picture_rect(1280.0, 720.0, p);
+        assert!(!fills);
+        assert_eq!((r.y, r.h), (p.y, p.h));
+        assert!(r.w < p.w);
     }
 }
